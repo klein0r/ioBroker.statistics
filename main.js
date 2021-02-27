@@ -1,273 +1,346 @@
-/**
- *
- * statistics adapter
- *
- * the adapter creates new states according to the configuration
- * the configured objects are subscribed for changes and the statistic is calculated
- *
- */
-
 /* jshint -W097 */
 /* jshint strict: false */
 /* jslint node: true */
 'use strict';
 
-// you have to require the utils module and call adapter function
-const utils = require('@iobroker/adapter-core'); // Get common adapter utils
+const utils        = require('@iobroker/adapter-core');
 const stateObjects = require('./lib/objects');
 const CronJob = require('cron').CronJob;
+const adapterName  = require('./package.json').name.split('.').pop();
 
-let adapter;
+class Statistics extends utils.Adapter {
 
-let crons = {};
-const typeObjects = {}; // to remember the used objects within the types (calculations)
-const statDP = {};      // contains the complete datasets (instead of adapter.config)
-const groups = {};
-let units = {};
-const tasks = [];
-const states = {}; // hold all states locally
+    /**
+     * @param {Partial<utils.AdapterOptions>} [options={}]
+     */
+    constructor(options) {
+        super({
+            ...options,
+            name: adapterName,
+        });
 
-const nameObjects = {
-    count: { // Count impulses or counting operations
-        save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'],
-        temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'last5Min', 'lastPulse']
-    },
-    sumCount: { // Addition of analogue values (consumption from pulses) Multiplication with price = costs
-        save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'],
-        temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year']
-    },
-    sumDelta: { // Consumption from continuous quantities () Multiplication with price = costs
-        save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'delta', 'last'],
-        temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year']//, 'last5Min']
-    },
-    sumGroup: { // Total consumption from consecutive quantities
-        save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'],
-        temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year']
-    },
-    minmax: { // Min/Max timeframe
-        save: ['dayMin', 'weekMin', 'monthMin', 'quarterMin', 'yearMin', 'dayMax', 'weekMax', 'monthMax', 'quarterMax', 'yearMax'],
-        temp: ['dayMin', 'weekMin', 'monthMin', 'quarterMin', 'yearMin', 'dayMax', 'weekMax', 'monthMax', 'quarterMax', 'yearMax', 'last']
-    },
-    avg: { // Mean values etc.
-        save: ['dayMin', 'dayMax', 'dayAvg'],
-        temp: ['dayMin', 'dayMax', 'dayAvg', 'dayCount', 'daySum', 'last']
-    },
-    timeCount: { // Operating time counting from status change
-        save: ['onDay', 'onWeek', 'onMonth', 'onQuarter', 'onYear', 'offDay', 'offWeek', 'offMonth', 'offQuarter', 'offYear'],
-        temp: ['onDay', 'onWeek', 'onMonth', 'onQuarter', 'onYear', 'offDay', 'offWeek', 'offMonth', 'offQuarter', 'offYear', 'last01', 'last10', 'last']
-    },
-    fiveMin: { // 5 minutes, etc. only useful with impulses
-        save: ['mean5Min', 'dayMax5Min', 'dayMin5Min'],
-        temp: ['mean5Min', 'dayMax5Min', 'dayMin5Min']
-    },
-};
+        this.crons = {};
+        this.typeObjects = {}; // to remember the used objects within the types (calculations)
+        this.statDP = {};      // contains the complete datasets (instead of this.config)
+        this.groups = {};
+        this.units = {};
+        this.tasks = [];
+        this.states = {};      // hold all states locally
 
-function roundValue(value, precision = 0) {
-    var multiplier = Math.pow(10, precision);
-    return Math.round(value * multiplier) / multiplier;
-}
+        this.column = ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
+        this.copyToSave = ['count', 'sumCount', 'sumGroup', 'sumDelta'];
 
-function stop() {
-    for (const type in crons) {
-        if (crons.hasOwnProperty(type) && crons[type]) {
-            crons[type].stop();
-            crons[type] = null;
+        this.nameObjects = {
+            count: { // Count impulses or counting operations
+                save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'],
+                temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'last5Min', 'lastPulse']
+            },
+            sumCount: { // Addition of analogue values (consumption from pulses) Multiplication with price = costs
+                save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'],
+                temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year']
+            },
+            sumDelta: { // Consumption from continuous quantities () Multiplication with price = costs
+                save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'delta', 'last'],
+                temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year']//, 'last5Min']
+            },
+            sumGroup: { // Total consumption from consecutive quantities
+                save: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'],
+                temp: ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year']
+            },
+            minmax: { // Min/Max timeframe
+                save: ['dayMin', 'weekMin', 'monthMin', 'quarterMin', 'yearMin', 'dayMax', 'weekMax', 'monthMax', 'quarterMax', 'yearMax'],
+                temp: ['dayMin', 'weekMin', 'monthMin', 'quarterMin', 'yearMin', 'dayMax', 'weekMax', 'monthMax', 'quarterMax', 'yearMax', 'last']
+            },
+            avg: { // Mean values etc.
+                save: ['dayMin', 'dayMax', 'dayAvg'],
+                temp: ['dayMin', 'dayMax', 'dayAvg', 'dayCount', 'daySum', 'last']
+            },
+            timeCount: { // Operating time counting from status change
+                save: ['onDay', 'onWeek', 'onMonth', 'onQuarter', 'onYear', 'offDay', 'offWeek', 'offMonth', 'offQuarter', 'offYear'],
+                temp: ['onDay', 'onWeek', 'onMonth', 'onQuarter', 'onYear', 'offDay', 'offWeek', 'offMonth', 'offQuarter', 'offYear', 'last01', 'last10', 'last']
+            },
+            fiveMin: { // 5 minutes, etc. only useful with impulses
+                save: ['mean5Min', 'dayMax5Min', 'dayMin5Min'],
+                temp: ['mean5Min', 'dayMax5Min', 'dayMin5Min']
+            },
+        };
+
+        this.on('ready', this.onReady.bind(this));
+        this.on('stateChange', this.onStateChange.bind(this));
+        this.on('unload', this.onUnload.bind(this));
+    }
+
+    roundValue(value, precision = 0) {
+        const multiplier = Math.pow(10, precision);
+        return Math.round(value * multiplier) / multiplier;
+    }
+
+    stopCrons() {
+        for (const type in this.crons) {
+            if (this.crons.hasOwnProperty(type) && this.crons[type]) {
+                this.crons[type].stop();
+                this.crons[type] = null;
+            }
         }
     }
-}
 
-function startAdapter(options) {
-    options = options || {};
-    Object.assign(options, {
-        name: 'statistics',
-        // is called when adapter shuts down - callback has to be called under any circumstances!
-        unload: callback => {
-            try {
-                adapter && adapter.log && adapter.log.info && adapter.log.info('cleaned everything up...');
-                // possibly also delete a few schedules
-                stop();
-                callback();
-            } catch (e) {
-                callback();
-            }
-        },
-        objectChange: (id, obj) => {
-            // Warning, obj can be null if it was deleted
-            // adapter.log.debug('received objectChange '+ id + ' obj  '+JSON.stringify(obj));
-            //nur das verarbeiten was auch diesen Adapter interessiert
-            if (obj && obj.common && obj.common.custom && obj.common.custom[adapter.namespace] && obj.common.custom[adapter.namespace].enabled) {
-                //hier sollte nur ein Datenpunkt angekommen sein
-                adapter.log.debug('received objectChange for stat' + id + ' ' + obj.common.custom);
-                // old but changhed
-                if (statDP[id]) {
-                    //adapter.log.info('neu aber anderes Setting ' + id);
-                    statDP[id] = obj.common.custom[adapter.namespace];
-                    removeObject(id);
-                    setupObjects([id], null, undefined, true);
-                    adapter.log.debug('saved typeObjects update1 ' + JSON.stringify(typeObjects));
-                } else {
-                    //adapter.log.info('ganz neu ' + id);
-                    statDP[id] = obj.common.custom[adapter.namespace];
-                    setupObjects([id]);
-                    adapter.log.info('enabled logging of ' + id);
-                    adapter.log.debug('saved typeObjects update2 ' + JSON.stringify(typeObjects));
-                }
-            } else if (statDP[id]) {
-                //adapter.log.info('alt aber disabled id' + id );
-                adapter.unsubscribeForeignStates(id);
-                delete statDP[id];
-                adapter.log.info('disabled logging of ' + id);
-                removeObject(id);
-                adapter.log.debug('saved typeObjects update3 ' + JSON.stringify(typeObjects));
-            }
-        },
-        // is called if a subscribed state changes
-        stateChange: (id, state) => {
-            // Warning, state can be null if it was deleted
-            adapter.log.debug('[STATE CHANGE] ======================= ' + id + ' =======================');
+    startAdapter(options) {
+        Object.assign(options, {
+            // is called when adapter shuts down - callback has to be called under any circumstances!
 
-            // you can use the ack flag to detect if it is status (true) or command (false)
-            if (state && state.ack ) {
-                adapter.log.debug('[STATE CHANGE] stateChange => ' + state.val + ' [' + state.ack + ']');
-
-                if (!state.val && state.val !== 0) {
-                    adapter.log.warn('[STATE CHANGE] wrong value => ' + state.val + ' on ' + id + ' => check the other adapter where value comes from ');
-                } else {
-                    if (typeObjects.sumDelta && typeObjects.sumDelta.includes(id)) {
-                        newSumDeltaValue(id, state.val);
-                    } else
-                    if (typeObjects.avg && typeObjects.avg.includes(id)) {
-                        newAvgValue(id, state.val);
-                    }
-
-                    if (typeObjects.minmax && typeObjects.minmax.includes(id)) {
-                        newMinMaxValue(id, state.val);
-                    }
-
-                    if (typeObjects.count && typeObjects.count.includes(id)) {
-                        newCountValue(id, state.val);
-                    }
-
-                    if (typeObjects.timeCount && typeObjects.timeCount.includes(id)) {
-                        newTimeCntValue(id, state);
-                    }
-                    // 5min is treated cyclically
-                }
-            }
-        },
-        // is called when databases are connected and adapter received configuration.
-        // start here!
-        ready: () => main()
-    });
-    adapter = new utils.Adapter(options);
-    return adapter;
-}
-
-function removeObject(id) { // interne states[id] auch löschen?
-    Object.keys(typeObjects).forEach(key => {
-        if (typeObjects[key] && Array.isArray(typeObjects[key])) {
-            const pos = typeObjects[key].indexOf(id);
-            if (pos !== -1) {
-                adapter.log.debug('found ' + id + ' on pos ' + typeObjects[key].indexOf(id) + ' of ' + key + ' for removal');
-                typeObjects[key].splice(pos, 1);
-            }
-        } else {
-            adapter.log.error(`Invalid structure of groups: ${JSON.stringify(typeObjects[key])}`);
-        }
-    });
-    Object.keys(groups).forEach(g => {
-        if (groups[g] && groups[g].items && Array.isArray(groups[g].items)) {
-            const pos = groups[g].items.indexOf(id);
-            if (pos !== -1) {
-                adapter.log.debug('found ' + id + ' on pos ' + groups[g].items.indexOf(id) + ' of ' + g + ' for removal');
-                groups[g].items.splice(pos, 1);
-            }
-        } else {
-            adapter.log.error(`Invalid structure of groups: ${JSON.stringify(groups[g].items)}`);
-        }
-    });
-}
-
-// to be removed in compact? process.on('SIGINT', stop);
-function timeConverter(timestamp) {
-    const a = new Date(timestamp);
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const year = a.getFullYear();
-    const month = months[a.getMonth()];
-    let date = a.getDate();
-    date = date < 10 ? ' ' + date : date;
-    let hour = a.getHours();
-    hour = hour < 10 ? '0' + hour : hour;
-    let min = a.getMinutes();
-    min = min < 10 ? '0' + min : min;
-    let sec = a.getSeconds();
-    sec = sec < 10 ? '0' + sec : sec;
-    return date + ' ' + month + ' ' + year + ' ' + hour + ':' + min + ':' + sec;
-}
-
-function fiveMin() {
-    adapter.log.debug('[5 MINUTES] evaluation');
-    const isStart = !tasks.length;
-    /**
-     * Determine 5min values
-     *
-     * Get current min from temp
-     * Get current max from temp
-     * current value from the monitored counter
-     * old value (before 5min) from the monitored counter
-     *
-     * determination delta and decision whether new min / max is stored
-     * current counter reading is written in the old value
-     *
-     * typeObjects.fiveMin [t] contains the objectId of the monitored counter
-     *
-     */
-
-    // go through all subscribed objects and write
-    if (typeObjects.fiveMin) {
-        for (let t = 0; t < typeObjects.fiveMin.length; t++) {
-            tasks.push({
-                name: 'async',
-                args: { id: typeObjects.fiveMin[t] },
-                callback: (args, callback) => {
-                    if (!statDP[args.id]) {
-                        return callback && callback();
-                    }
-                    let temp5MinID;
-                    let actualID;
-                    if (statDP[args.id].sumDelta) {
-                        temp5MinID = 'temp.sumDelta.' + args.id + '.last5Min';
-                        actualID = 'save.sumDelta.' + args.id + '.last';
+            objectChange: (id, obj) => {
+                // Warning, obj can be null if it was deleted
+                // this.log.debug('received objectChange '+ id + ' obj  '+JSON.stringify(obj));
+                //nur das verarbeiten was auch diesen Adapter interessiert
+                if (obj && obj.common && obj.common.custom && obj.common.custom[this.namespace] && obj.common.custom[this.namespace].enabled) {
+                    //hier sollte nur ein Datenpunkt angekommen sein
+                    this.log.debug('received objectChange for stat' + id + ' ' + obj.common.custom);
+                    // old but changhed
+                    if (this.statDP[id]) {
+                        //this.log.info('neu aber anderes Setting ' + id);
+                        this.statDP[id] = obj.common.custom[this.namespace];
+                        this.removeObject(id);
+                        this.setupObjects([id], null, undefined, true);
+                        this.log.debug('saved typeObjects update1 ' + JSON.stringify(this.typeObjects));
                     } else {
-                        temp5MinID = 'temp.count.' + args.id + '.last5Min';
-                        actualID = 'temp.count.' + args.id + '.day';
+                        //this.log.info('ganz neu ' + id);
+                        this.statDP[id] = obj.common.custom[this.namespace];
+                        this.setupObjects([id]);
+                        this.log.info('enabled logging of ' + id);
+                        this.log.debug('saved typeObjects update2 ' + JSON.stringify(this.typeObjects));
                     }
-                    getValue(actualID, (err, actual) => {
-                        if (actual === null) {
-                            return callback();
+                } else if (this.statDP[id]) {
+                    //this.log.info('alt aber disabled id' + id );
+                    this.unsubscribeForeignStates(id);
+                    delete this.statDP[id];
+                    this.log.info('disabled logging of ' + id);
+                    this.removeObject(id);
+                    this.log.debug('saved typeObjects update3 ' + JSON.stringify(this.typeObjects));
+                }
+            },
+            // is called if a subscribed state changes
+            stateChange: (id, state) => {
+                // Warning, state can be null if it was deleted
+                this.log.debug('[STATE CHANGE] ======================= ' + id + ' =======================');
+
+                // you can use the ack flag to detect if it is status (true) or command (false)
+                if (state && state.ack ) {
+                    this.log.debug('[STATE CHANGE] stateChange => ' + state.val + ' [' + state.ack + ']');
+
+                    if (!state.val && state.val !== 0) {
+                        this.log.warn('[STATE CHANGE] wrong value => ' + state.val + ' on ' + id + ' => check the other adapter where value comes from ');
+                    } else {
+                        if (this.typeObjects.sumDelta && this.typeObjects.sumDelta.includes(id)) {
+                            this.newSumDeltaValue(id, state.val);
+                        } else if (this.typeObjects.avg && this.typeObjects.avg.includes(id)) {
+                            this.newAvgValue(id, state.val);
                         }
-                        getValue('temp.fiveMin.' + args.id + '.dayMin5Min', (err, min) => {
-                            getValue('temp.fiveMin.' + args.id + '.dayMax5Min', (err, max) => {
-                                getValue(temp5MinID, (err, old) => {
-                                    // Write actual state into counter object
-                                    setValueStat(temp5MinID, actual, () => {
-                                        if (old === null) {
-                                            return callback();
-                                        }
-                                        const delta = actual - old;
-                                        adapter.log.debug('[STATE CHANGE] fiveMin; of : ' + args.id + ' with  min: ' + min + ' max: ' + max + ' actual: ' + actual + ' old: ' + old + ' delta: ' + delta);
-                                        setValueStat('temp.fiveMin.' + args.id + '.mean5Min', delta, () => {
-                                            if (max === null || delta > max) {
-                                                adapter.log.debug('[STATE CHANGE] new Max ' + 'temp.fiveMin.' + args.id + '.dayMax5Min'+ ': ' + delta);
-                                                setValueStat('temp.fiveMin.' + args.id + '.dayMax5Min', delta, callback);
-                                                callback = null;
+
+                        if (this.typeObjects.minmax && this.typeObjects.minmax.includes(id)) {
+                            this.newMinMaxValue(id, state.val);
+                        }
+
+                        if (this.typeObjects.count && this.typeObjects.count.includes(id)) {
+                            this.newCountValue(id, state.val);
+                        }
+
+                        if (this.typeObjects.timeCount && this.typeObjects.timeCount.includes(id)) {
+                            this.newTimeCntValue(id, state);
+                        }
+                        // 5min is treated cyclically
+                    }
+                }
+            }
+        });
+    }
+
+    removeObject(id) { // interne states[id] auch löschen?
+        Object.keys(this.typeObjects).forEach(key => {
+            if (this.typeObjects[key] && Array.isArray(this.typeObjects[key])) {
+                const pos = this.typeObjects[key].indexOf(id);
+                if (pos !== -1) {
+                    this.log.debug('found ' + id + ' on pos ' + this.typeObjects[key].indexOf(id) + ' of ' + key + ' for removal');
+                    this.typeObjects[key].splice(pos, 1);
+                }
+            } else {
+                this.log.error(`Invalid structure of groups: ${JSON.stringify(this.typeObjects[key])}`);
+            }
+        });
+        Object.keys(this.groups).forEach(g => {
+            if (this.groups[g] && this.groups[g].items && Array.isArray(this.groups[g].items)) {
+                const pos = this.groups[g].items.indexOf(id);
+                if (pos !== -1) {
+                    this.log.debug('found ' + id + ' on pos ' + this.groups[g].items.indexOf(id) + ' of ' + g + ' for removal');
+                    this.groups[g].items.splice(pos, 1);
+                }
+            } else {
+                this.log.error(`Invalid structure of groups: ${JSON.stringify(this.groups[g].items)}`);
+            }
+        });
+    }
+
+    // to be removed in compact? process.on('SIGINT', stop);
+    timeConverter(timestamp) {
+        const a = new Date(timestamp);
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const year = a.getFullYear();
+        const month = months[a.getMonth()];
+        let date = a.getDate();
+        date = date < 10 ? ' ' + date : date;
+        let hour = a.getHours();
+        hour = hour < 10 ? '0' + hour : hour;
+        let min = a.getMinutes();
+        min = min < 10 ? '0' + min : min;
+        let sec = a.getSeconds();
+        sec = sec < 10 ? '0' + sec : sec;
+        return date + ' ' + month + ' ' + year + ' ' + hour + ':' + min + ':' + sec;
+    }
+
+    fiveMin() {
+        this.log.debug('[5 MINUTES] evaluation');
+        const isStart = !this.tasks.length;
+        /**
+         * Determine 5min values
+         *
+         * Get current min from temp
+         * Get current max from temp
+         * current value from the monitored counter
+         * old value (before 5min) from the monitored counter
+         *
+         * determination delta and decision whether new min / max is stored
+         * current counter reading is written in the old value
+         *
+         * typeObjects.fiveMin [t] contains the objectId of the monitored counter
+         *
+         */
+
+        // go through all subscribed objects and write
+        if (this.typeObjects.fiveMin) {
+            for (let t = 0; t < this.typeObjects.fiveMin.length; t++) {
+                this.tasks.push({
+                    name: 'async',
+                    args: { id: this.typeObjects.fiveMin[t] },
+                    callback: (args, callback) => {
+                        if (!this.statDP[args.id]) {
+                            return callback && callback();
+                        }
+                        let temp5MinID;
+                        let actualID;
+                        if (this.statDP[args.id].sumDelta) {
+                            temp5MinID = 'temp.sumDelta.' + args.id + '.last5Min';
+                            actualID = 'save.sumDelta.' + args.id + '.last';
+                        } else {
+                            temp5MinID = 'temp.count.' + args.id + '.last5Min';
+                            actualID = 'temp.count.' + args.id + '.day';
+                        }
+                        this.getValue(actualID, (err, actual) => {
+                            if (actual === null) {
+                                return callback();
+                            }
+                            this.getValue('temp.fiveMin.' + args.id + '.dayMin5Min', (err, min) => {
+                                this.getValue('temp.fiveMin.' + args.id + '.dayMax5Min', (err, max) => {
+                                    this.getValue(temp5MinID, (err, old) => {
+                                        // Write actual state into counter object
+                                        this.setValueStat(temp5MinID, actual, () => {
+                                            if (old === null) {
+                                                return callback();
                                             }
-                                            if (min === null || delta < min) {
-                                                adapter.log.debug('[STATE CHANGE] new Min ' + 'temp.fiveMin.' + args.id + '.dayMin5Min' + ': ' + delta);
-                                                setValueStat('temp.fiveMin.' + args.id + '.dayMin5Min', delta, callback);
-                                                callback = null;
+                                            const delta = actual - old;
+                                            this.log.debug('[STATE CHANGE] fiveMin; of : ' + args.id + ' with  min: ' + min + ' max: ' + max + ' actual: ' + actual + ' old: ' + old + ' delta: ' + delta);
+                                            this.setValueStat('temp.fiveMin.' + args.id + '.mean5Min', delta, () => {
+                                                if (max === null || delta > max) {
+                                                    this.log.debug('[STATE CHANGE] new Max ' + 'temp.fiveMin.' + args.id + '.dayMax5Min'+ ': ' + delta);
+                                                    this.setValueStat('temp.fiveMin.' + args.id + '.dayMax5Min', delta, callback);
+                                                    callback = null;
+                                                }
+                                                if (min === null || delta < min) {
+                                                    this.log.debug('[STATE CHANGE] new Min ' + 'temp.fiveMin.' + args.id + '.dayMin5Min' + ': ' + delta);
+                                                    this.setValueStat('temp.fiveMin.' + args.id + '.dayMin5Min', delta, callback);
+                                                    callback = null;
+                                                }
+                                                callback && callback();
+                                            });
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    }
+                });
+            }
+        }
+        isStart && this.processTasks();
+    }
+
+    // cached function
+    getValue(id, callback) {
+        if (this.states.hasOwnProperty(id)) {
+            callback(null, this.states[id]);
+        } else {
+            this.getForeignState(this.namespace + '.' + id, (err, value) => {
+                if (value) {
+                    this.states[id] = value.val;
+                } else {
+                    this.states[id] = null;
+                }
+                callback(err, this.states[id], value && value.ts);
+            });
+        }
+    }
+
+    // cached function
+    setValueStat(id, val, callback) {
+        const ts = new Date();
+        ts.setMinutes(ts.getMinutes() - 1);
+        ts.setSeconds(59);
+        ts.setMilliseconds(0);
+        this.states[id] = val;
+        this.setForeignState(this.namespace + '.' + id, { val, ts: ts.getTime(), ack: true }, callback);
+    }
+
+    // cached function
+    setValue(id, val, callback) {
+        this.states[id] = val;
+        this.setForeignState(this.namespace + '.' + id, val, true, callback);
+    }
+
+    newAvgValue(id, value) {
+        const isStart = !this.tasks.length;
+        /**
+         * Comparison between last min / max and now transmitted value
+         */
+        value = parseFloat(value); // || 0; if NaN we should not put a zero inside, better to skip everything
+
+        if (!isNaN(value)) {
+            this.log.debug('[STATE CHANGE] avg call: ' + id + ' value ' + value);
+            this.tasks.push({
+                name: 'async',
+                args: {
+                    id,
+                    value
+                }, callback: (args, callback) => {
+                    this.log.debug('[STATE CHANGE] new last for "' + 'temp.avg.' + args.id + '.last' + ': ' + value);
+                    this.setValue('temp.avg.' + args.id + '.last', value); //memorize current value to have it available when date change for actual=starting point of new time frame
+                    this.getValue('temp.avg.' + args.id + '.dayCount', (err, count) => {
+                        count = count ? count + 1 : 1;
+                        this.setValue('temp.avg.' + args.id + '.dayCount', count, () => {
+                            this.getValue('temp.avg.' + args.id + '.daySum', (err, sum) => {
+                                sum = sum ? sum + value : value;
+                                this.setValue('temp.avg.' + args.id + '.daySum', sum, () => {
+                                    this.setValue('temp.avg.' + args.id + '.dayAvg', this.roundValue(sum / count, 4), () => {
+                                        this.getValue('temp.avg.' + args.id + '.dayMin', (err, tempMin) => {
+                                            if (tempMin === null || tempMin > value) {
+                                                this.setValue('temp.avg.' + args.id + '.dayMin', value);
+                                                this.log.debug('[STATE CHANGE] new min for "' + 'temp.avg.' + args.id + '.dayMin' + ': ' + value);
                                             }
-                                            callback && callback();
+                                            this.getValue('temp.avg.' + args.id + '.dayMax', (err, tempMax) => {
+                                                if (tempMax === null || tempMax < value) {
+                                                    this.setValue('temp.avg.' + args.id + '.dayMax', value, callback);
+                                                    this.log.debug('[STATE CHANGE] new max for "' + 'temp.avg.' + args.id + '.dayMax'+ ': ' + value);
+                                                } else {
+                                                    callback && callback();
+                                                }
+                                            });
                                         });
                                     });
                                 });
@@ -276,159 +349,79 @@ function fiveMin() {
                     });
                 }
             });
+            isStart && this.processTasks();
         }
     }
-    isStart && processTasks();
-}
 
-// cached function
-function getValue(id, callback) {
-    if (states.hasOwnProperty(id)) {
-        callback(null, states[id]);
-    } else {
-        adapter.getForeignState(adapter.namespace + '.' + id, (err, value) => {
-            if (value) {
-                states[id] = value.val;
-            } else {
-                states[id] = null;
-            }
-            callback(err, states[id], value && value.ts);
-        });
-    }
-}
-
-// cached function
-function setValueStat(id, val, callback) {
-    let ts = new Date();
-    ts.setMinutes(ts.getMinutes() - 1);
-    ts.setSeconds(59);
-    ts.setMilliseconds(0);
-    states[id] = val;
-    adapter.setForeignState(adapter.namespace + '.' + id, { val, ts: ts.getTime(), ack: true }, callback);
-}
-
-// cached function
-function setValue(id, val, callback) {
-    states[id] = val;
-    adapter.setForeignState(adapter.namespace + '.' + id, val, true, callback);
-}
-
-function newAvgValue(id, value) {
-    const isStart = !tasks.length;
-    /**
-     * Comparison between last min / max and now transmitted value
-     */
-    value = parseFloat(value); // || 0; if NaN we should not put a zero inside, better to skip everything
-
-    if (!isNaN(value)) {
-        adapter.log.debug('[STATE CHANGE] avg call: ' + id + ' value ' + value);
-        tasks.push({
-            name: 'async',
-            args: {
-                id,
-                value
-            }, callback: (args, callback) => {
-                adapter.log.debug('[STATE CHANGE] new last for "' + 'temp.avg.' + args.id + '.last' + ': ' + value);
-                setValue('temp.avg.' + args.id + '.last', value); //memorize current value to have it available when date change for actual=starting point of new time frame
-                getValue('temp.avg.' + args.id + '.dayCount', (err, count) => {
-                    count = count ? count + 1 : 1;
-                    setValue('temp.avg.' + args.id + '.dayCount', count, () => {
-                        getValue('temp.avg.' + args.id + '.daySum', (err, sum) => {
-                            sum = sum ? sum + value : value;
-                            setValue('temp.avg.' + args.id + '.daySum', sum, () => {
-                                setValue('temp.avg.' + args.id + '.dayAvg', roundValue(sum / count, 4), () => {
-                                    getValue('temp.avg.' + args.id + '.dayMin', (err, tempMin) => {
-                                        if (tempMin === null || tempMin > value) {
-                                            setValue('temp.avg.' + args.id + '.dayMin', value);
-                                            adapter.log.debug('[STATE CHANGE] new min for "' + 'temp.avg.' + args.id + '.dayMin' + ': ' + value);
-                                        }
-                                        getValue('temp.avg.' + args.id + '.dayMax', (err, tempMax) => {
-                                            if (tempMax === null || tempMax < value) {
-                                                setValue('temp.avg.' + args.id + '.dayMax', value, callback);
-                                                adapter.log.debug('[STATE CHANGE] new max for "' + 'temp.avg.' + args.id + '.dayMax'+ ': ' + value);
-                                            } else {
-                                                callback && callback();
-                                            }
-                                        });
-                                    });
-                                })
-                            });
-                        });
-                    });
-                });
-            }
-        });
-        isStart && processTasks();
-    }
-}
-function newMinMaxValue(id, value) {
-    const isStart = !tasks.length;
-    /**
-     * Comparison between last min / max and now transmitted value
-     */
-    value = parseFloat(value) || 0;
-    if (!isNaN(value)) {
-        adapter.log.debug('[STATE CHANGE] minmax call: ' + id + ' value ' + value);
-        tasks.push({
-            name: 'async',
-            args: {
-                id,
-                value
-            }, callback: (args, callback) => {
-                adapter.log.debug('[STATE CHANGE] new last for "' + 'temp.minmax.' + args.id + '.last' + ': ' + value);
-                setValue('temp.minmax.' + args.id + '.last', value); //memorize current value to have it available when date change for actual=starting point of new time frame
-                getValue('temp.minmax.' + args.id + '.yearMin', (err, tempMin) => {
-                    if (tempMin === null || tempMin > value) {
-                        setValue('temp.minmax.' + args.id + '.yearMin', value);
-                        adapter.log.debug('[STATE CHANGE] new year min for "' + args.id + ': ' + value);
-                    }
-                    getValue('temp.minmax.' + args.id + '.yearMax', (err, tempMax) => {
-                        if (tempMax === null || tempMax < value) {
-                            setValue('temp.minmax.' + args.id + '.yearMax', value);
-                            adapter.log.debug('[STATE CHANGE] new year max for "' + args.id + ': ' + value);
+    newMinMaxValue(id, value) {
+        const isStart = !this.tasks.length;
+        /**
+         * Comparison between last min / max and now transmitted value
+         */
+        value = parseFloat(value) || 0;
+        if (!isNaN(value)) {
+            this.log.debug('[STATE CHANGE] minmax call: ' + id + ' value ' + value);
+            this.tasks.push({
+                name: 'async',
+                args: {
+                    id,
+                    value
+                }, callback: (args, callback) => {
+                    this.log.debug('[STATE CHANGE] new last for "' + 'temp.minmax.' + args.id + '.last' + ': ' + value);
+                    this.setValue('temp.minmax.' + args.id + '.last', value); //memorize current value to have it available when date change for actual=starting point of new time frame
+                    this.getValue('temp.minmax.' + args.id + '.yearMin', (err, tempMin) => {
+                        if (tempMin === null || tempMin > value) {
+                            this.setValue('temp.minmax.' + args.id + '.yearMin', value);
+                            this.log.debug('[STATE CHANGE] new year min for "' + args.id + ': ' + value);
                         }
-                        getValue('temp.minmax.' + args.id + '.quarterMin', (err, tempMin) => {
-                            if (tempMin === null || tempMin > value) {
-                                setValue('temp.minmax.' + args.id + '.quarterMin', value);
-                                adapter.log.debug('[STATE CHANGE] new quarter min for "' + args.id + ': ' + value);
+                        this.getValue('temp.minmax.' + args.id + '.yearMax', (err, tempMax) => {
+                            if (tempMax === null || tempMax < value) {
+                                this.setValue('temp.minmax.' + args.id + '.yearMax', value);
+                                this.log.debug('[STATE CHANGE] new year max for "' + args.id + ': ' + value);
                             }
-                            getValue('temp.minmax.' + args.id + '.quarterMax', (err, tempMax) => {
-                                if (tempMax === null || tempMax < value) {
-                                    setValue('temp.minmax.' + args.id + '.quarterMax', value);
-                                    adapter.log.debug('[STATE CHANGE] new quarter max for "' + args.id + ': ' + value);
+                            this.getValue('temp.minmax.' + args.id + '.quarterMin', (err, tempMin) => {
+                                if (tempMin === null || tempMin > value) {
+                                    this.setValue('temp.minmax.' + args.id + '.quarterMin', value);
+                                    this.log.debug('[STATE CHANGE] new quarter min for "' + args.id + ': ' + value);
                                 }
-                                getValue('temp.minmax.' + args.id + '.monthMin', (err, tempMin) => {
-                                    if (tempMin === null || tempMin > value) {
-                                        setValue('temp.minmax.' + args.id + '.monthMin', value);
-                                        adapter.log.debug('[STATE CHANGE] new month min for "' + args.id + ': ' + value);
+                                this.getValue('temp.minmax.' + args.id + '.quarterMax', (err, tempMax) => {
+                                    if (tempMax === null || tempMax < value) {
+                                        this.setValue('temp.minmax.' + args.id + '.quarterMax', value);
+                                        this.log.debug('[STATE CHANGE] new quarter max for "' + args.id + ': ' + value);
                                     }
-                                    getValue('temp.minmax.' + args.id + '.monthMax', (err, tempMax) => {
-                                        if (tempMax === null || tempMax < value) {
-                                            setValue('temp.minmax.' + args.id + '.monthMax', value);
-                                            adapter.log.debug('[STATE CHANGE] new month max for "' + args.id + ': ' + value);
+                                    this.getValue('temp.minmax.' + args.id + '.monthMin', (err, tempMin) => {
+                                        if (tempMin === null || tempMin > value) {
+                                            this.setValue('temp.minmax.' + args.id + '.monthMin', value);
+                                            this.log.debug('[STATE CHANGE] new month min for "' + args.id + ': ' + value);
                                         }
-                                        getValue('temp.minmax.' + args.id + '.weekMin', (err, tempMin) => {
-                                            if (tempMin === null || tempMin > value) {
-                                                setValue('temp.minmax.' + args.id + '.weekMin', value);
-                                                adapter.log.debug('[STATE CHANGE] new week min for "' + args.id + ': ' + value);
+                                        this.getValue('temp.minmax.' + args.id + '.monthMax', (err, tempMax) => {
+                                            if (tempMax === null || tempMax < value) {
+                                                this.setValue('temp.minmax.' + args.id + '.monthMax', value);
+                                                this.log.debug('[STATE CHANGE] new month max for "' + args.id + ': ' + value);
                                             }
-                                            getValue('temp.minmax.' + args.id + '.weekMax', (err, tempMax) => {
-                                                if (tempMax === null || tempMax < value) {
-                                                    setValue('temp.minmax.' + args.id + '.weekMax', value);
-                                                    adapter.log.debug('[STATE CHANGE] new week max for "' + args.id + ': ' + value);
+                                            this.getValue('temp.minmax.' + args.id + '.weekMin', (err, tempMin) => {
+                                                if (tempMin === null || tempMin > value) {
+                                                    this.setValue('temp.minmax.' + args.id + '.weekMin', value);
+                                                    this.log.debug('[STATE CHANGE] new week min for "' + args.id + ': ' + value);
                                                 }
-                                                getValue('temp.minmax.' + args.id + '.dayMin', (err, tempMin) => {
-                                                    if (tempMin === null || tempMin > value) {
-                                                        setValue('temp.minmax.' + args.id + '.dayMin', value);
-                                                        adapter.log.debug('[STATE CHANGE] new day min for "' + args.id + ': ' + value);
+                                                this.getValue('temp.minmax.' + args.id + '.weekMax', (err, tempMax) => {
+                                                    if (tempMax === null || tempMax < value) {
+                                                        this.setValue('temp.minmax.' + args.id + '.weekMax', value);
+                                                        this.log.debug('[STATE CHANGE] new week max for "' + args.id + ': ' + value);
                                                     }
-                                                    getValue('temp.minmax.' + args.id + '.dayMax', (err, tempMax) => {
-                                                        if (tempMax === null || tempMax < value) {
-                                                            setValue('temp.minmax.' + args.id + '.dayMax', value, callback);
-                                                            adapter.log.debug('[STATE CHANGE] new day max for "' + args.id + ': ' + value);
-                                                        } else {
-                                                            callback && callback();
+                                                    this.getValue('temp.minmax.' + args.id + '.dayMin', (err, tempMin) => {
+                                                        if (tempMin === null || tempMin > value) {
+                                                            this.setValue('temp.minmax.' + args.id + '.dayMin', value);
+                                                            this.log.debug('[STATE CHANGE] new day min for "' + args.id + ': ' + value);
                                                         }
+                                                        this.getValue('temp.minmax.' + args.id + '.dayMax', (err, tempMax) => {
+                                                            if (tempMax === null || tempMax < value) {
+                                                                this.setValue('temp.minmax.' + args.id + '.dayMax', value, callback);
+                                                                this.log.debug('[STATE CHANGE] new day max for "' + args.id + ': ' + value);
+                                                            } else {
+                                                                callback && callback();
+                                                            }
+                                                        });
                                                     });
                                                 });
                                             });
@@ -438,413 +431,413 @@ function newMinMaxValue(id, value) {
                             });
                         });
                     });
-                });
-            }
-        });
-        isStart && processTasks();
-    }
-}
-function newCountValue(id, value) {
-    const isStart = !tasks.length;
-    /*
-        value with limit or state
-        Change to 1 -> increase by 1
-        Value greater threshold -> increase by 1
-    */
-    adapter.log.debug('[STATE CHANGE] count call ' + id + ' with ' + value);
-    // nicht nur auf true/false prüfen, es muß sich um eine echte Flanke handeln
-    // derzeitigen Zustand mit prüfen, sonst werden subscribed status updates mitgezählt
-    if (isTrueNew(id, value)) {
-        tasks.push({
-            name: 'async',
-            args: { id },
-            callback: (args, callback) => {
-                if (!statDP[args.id]) {
-                    return callback && callback();
                 }
+            });
+            isStart && this.processTasks();
+        }
+    }
 
-                for (let s = 0; s < nameObjects.count.temp.length; s++) {
-                    if (nameObjects.count.temp[s] !== 'lastPulse') {
-                        tasks.push({
-                            name: 'async',
-                            args: {
-                                id: 'temp.count.' + id + '.' + nameObjects.count.temp[s]
-                            },
-                            callback: (args, callback) => {
-                                getValue(args.id, (err, oldVal) => {
-                                    oldVal = oldVal ? oldVal + 1 : 1;
-                                    adapter.log.debug('[STATE CHANGE] Increase ' + args.id + ' on 1 to ' + oldVal);
-                                    setValue(args.id, oldVal, callback);
-                                });
-                            }
-                        });
-                        // Calculation of consumption (what is a physical-sized pulse)
-                        if (typeObjects.sumCount &&
-                            typeObjects.sumCount.indexOf(args.id) !== -1 &&
-                            statDP[args.id].impUnitPerImpulse) { // counter mit Verbrauch
-                            tasks.push({
+    newCountValue(id, value) {
+        const isStart = !this.tasks.length;
+        /*
+            value with limit or state
+            Change to 1 -> increase by 1
+            Value greater threshold -> increase by 1
+        */
+        this.log.debug('[STATE CHANGE] count call ' + id + ' with ' + value);
+        // nicht nur auf true/false prüfen, es muß sich um eine echte Flanke handeln
+        // derzeitigen Zustand mit prüfen, sonst werden subscribed status updates mitgezählt
+        if (this.isTrueNew(id, value)) {
+            this.tasks.push({
+                name: 'async',
+                args: { id },
+                callback: (args, callback) => {
+                    if (!this.statDP[args.id]) {
+                        return callback && callback();
+                    }
+
+                    for (let s = 0; s < this.nameObjects.count.temp.length; s++) {
+                        if (this.nameObjects.count.temp[s] !== 'lastPulse') {
+                            this.tasks.push({
                                 name: 'async',
                                 args: {
-                                    id: 'temp.sumCount.' + args.id + '.' + nameObjects.count.temp[s],
-                                    impUnitPerImpulse: statDP[args.id].impUnitPerImpulse
+                                    id: 'temp.count.' + id + '.' + this.nameObjects.count.temp[s]
                                 },
                                 callback: (args, callback) => {
-                                    getValue(args.id, (err, consumption) => {
-                                        const value = consumption ? consumption + args.impUnitPerImpulse : args.impUnitPerImpulse;
-                                        adapter.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.impUnitPerImpulse + ' to ' + value);
-                                        setValue(args.id, value, callback)
-                                    })
+                                    this.getValue(args.id, (err, oldVal) => {
+                                        oldVal = oldVal ? oldVal + 1 : 1;
+                                        this.log.debug('[STATE CHANGE] Increase ' + args.id + ' on 1 to ' + oldVal);
+                                        this.setValue(args.id, oldVal, callback);
+                                    });
                                 }
                             });
-                            // add consumption to group
-                            if (statDP[args.id].sumGroup &&
-                                groups[statDP[args.id].sumGroup] &&
-                                groups[statDP[args.id].sumGroup].config &&
-                                statDP[args.id].impUnitPerImpulse &&
-                                statDP[args.id].groupFactor
-                            ) {
-                                const factor = statDP[args.id].groupFactor;
-                                const price = groups[statDP[args.id].sumGroup].config.price;
-                                for (let i = 0; i < nameObjects.sumGroup.temp.length; i++) {
-                                    tasks.push({
-                                        name: 'async',
-                                        args: {
-                                            delta: statDP[args.id].impUnitPerImpulse * factor * price,
-                                            id: 'temp.sumGroup.' + statDP[args.id].sumGroup + '.' + nameObjects.sumGroup.temp[i],
-                                            type: nameObjects.sumGroup.temp[i]
-                                        },
-                                        callback: (args, callback) =>
-                                            getValue(args.id, (err, value, ts) => {
-                                                if (ts) {
-                                                    value = checkValue(value || 0, ts, args.id, args.type);
-                                                }
-                                                // value auf 4 stellen hinter dem Komma festgelegt
-                                                value = roundValue(((value || 0) + args.delta), 4);
-                                                adapter.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.delta + ' to ' + value);
-                                                setValue(args.id, value, callback);
-                                            })
-                                    });
+                            // Calculation of consumption (what is a physical-sized pulse)
+                            if (this.typeObjects.sumCount &&
+                                this.typeObjects.sumCount.indexOf(args.id) !== -1 &&
+                                this.statDP[args.id].impUnitPerImpulse) { // counter mit Verbrauch
+                                this.tasks.push({
+                                    name: 'async',
+                                    args: {
+                                        id: 'temp.sumCount.' + args.id + '.' + this.nameObjects.count.temp[s],
+                                        impUnitPerImpulse: this.statDP[args.id].impUnitPerImpulse
+                                    },
+                                    callback: (args, callback) => {
+                                        this.getValue(args.id, (err, consumption) => {
+                                            const value = consumption ? consumption + args.impUnitPerImpulse : args.impUnitPerImpulse;
+                                            this.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.impUnitPerImpulse + ' to ' + value);
+                                            this.setValue(args.id, value, callback);
+                                        });
+                                    }
+                                });
+                                // add consumption to group
+                                if (this.statDP[args.id].sumGroup &&
+                                    this.groups[this.statDP[args.id].sumGroup] &&
+                                    this.groups[this.statDP[args.id].sumGroup].config &&
+                                    this.statDP[args.id].impUnitPerImpulse &&
+                                    this.statDP[args.id].groupFactor
+                                ) {
+                                    const factor = this.statDP[args.id].groupFactor;
+                                    const price = this.groups[this.statDP[args.id].sumGroup].config.price;
+                                    for (let i = 0; i < this.nameObjects.sumGroup.temp.length; i++) {
+                                        this.tasks.push({
+                                            name: 'async',
+                                            args: {
+                                                delta: this.statDP[args.id].impUnitPerImpulse * factor * price,
+                                                id: 'temp.sumGroup.' + this.statDP[args.id].sumGroup + '.' + this.nameObjects.sumGroup.temp[i],
+                                                type: this.nameObjects.sumGroup.temp[i]
+                                            },
+                                            callback: (args, callback) =>
+                                                this.getValue(args.id, (err, value, ts) => {
+                                                    if (ts) {
+                                                        value = this.checkValue(value || 0, ts, args.id, args.type);
+                                                    }
+                                                    // value auf 4 stellen hinter dem Komma festgelegt
+                                                    value = this.roundValue(((value || 0) + args.delta), 4);
+                                                    this.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.delta + ' to ' + value);
+                                                    this.setValue(args.id, value, callback);
+                                                })
+                                        });
+                                    }
                                 }
                             }
                         }
                     }
+                    callback();
                 }
-                callback();
-            }
-        });
+            });
+        }
+        isStart && this.processTasks();
     }
-    isStart && processTasks();
-}
 
-function checkValue(value, ts, id, type) {
-    let now = new Date();
-    now.setSeconds(0);
-    now.setMilliseconds(0);
-    if (type === '15Min') {
-        // value may not be older than 15 min
-        now.setMinutes(now.getMinutes() - now.getMinutes() % 15);
-    } else
+    checkValue(value, ts, id, type) {
+        const now = new Date();
+        now.setSeconds(0);
+        now.setMilliseconds(0);
+        if (type === '15Min') {
+            // value may not be older than 15 min
+            now.setMinutes(now.getMinutes() - now.getMinutes() % 15);
+        } else
         if (type === 'hour') {
             // value may not be older than full hour
             now.setMinutes(0);
         } else
-            if (type === 'day') {
-                // value may not be older than 00:00 of today
-                now.setMinutes(0);
-                now.setHours(0);
-            } else
-                if (type === 'week') {
-                    // value may not be older than 00:00 of today
-                    now.setMinutes(0);
-                    now.setHours(0);
-                } else
-                    if (type === 'month') {
-                        // value may not be older than 00:00 of today
-                        now.setMinutes(0);
-                        now.setHours(0);
-                        now.setDate(1);
-                    } else
-                        if (type === 'quarter') {
-                            // value may not be older than 00:00 of today
-                            now.setMinutes(0);
-                            now.setHours(0);
-                            now.setDate(1);
-                            //0, 3, 6, 9
-                            now.setMonth(now.getMonth() - now.getMonth() % 3);
-                        } else
-                            if (type === 'year') {
-                                // value may not be older than 1 Januar of today
-                                now.setMinutes(0);
-                                now.setHours(0);
-                                now.setDate(1);
-                                now.setMonth(0);
-                            } else {
-                                adapter.log.error('Unknown calc type: ' + type);
-                                return value;
-                            }
-    if (ts < now.getTime()) {
-        adapter.log.warn('[STATE CHANGE] Value of ' + id + ' ignored because older than ' + now.toISOString());
-        value = 0;
+        if (type === 'day') {
+            // value may not be older than 00:00 of today
+            now.setMinutes(0);
+            now.setHours(0);
+        } else
+        if (type === 'week') {
+            // value may not be older than 00:00 of today
+            now.setMinutes(0);
+            now.setHours(0);
+        } else
+        if (type === 'month') {
+            // value may not be older than 00:00 of today
+            now.setMinutes(0);
+            now.setHours(0);
+            now.setDate(1);
+        } else
+        if (type === 'quarter') {
+            // value may not be older than 00:00 of today
+            now.setMinutes(0);
+            now.setHours(0);
+            now.setDate(1);
+            //0, 3, 6, 9
+            now.setMonth(now.getMonth() - now.getMonth() % 3);
+        } else
+        if (type === 'year') {
+            // value may not be older than 1 Januar of today
+            now.setMinutes(0);
+            now.setHours(0);
+            now.setDate(1);
+            now.setMonth(0);
+        } else {
+            this.log.error('Unknown calc type: ' + type);
+            return value;
+        }
+        if (ts < now.getTime()) {
+            this.log.warn('[STATE CHANGE] Value of ' + id + ' ignored because older than ' + now.toISOString());
+            value = 0;
+        }
+        return value;
     }
-    return value;
-}
 
-function newSumDeltaValue(id, value) {
-    const isStart = !tasks.length;
-    /*
-        determine the consumption per period as consecutive meter readings.
-             - Validity check new value must be greater than age
-             - Subtraction with last value Day
-             - Subtraction with last value today -> delta for sum
-             - Add delta to all values
-             - treat own values differently (datapoint name)
-    */
-    value = parseFloat(value) || 0; //here we can probably leave the 0, if undefined then we have 0
-    tasks.push({
-        name: 'async',
-        args: { id },
-        callback: (args, callback) => {
-            getValue('save.sumDelta.' + args.id + '.last', (err, old) => {
-                if (!statDP[args.id]) {
-                    return callback && callback();
-                }
-
-                tasks.push({
-                    name: 'async',
-                    args: { id: 'save.sumDelta.' + args.id + '.last', value },
-                    callback: (args, callback) => setValue(args.id, args.value, callback)
-                });
-                if (old === null) {
-                    return callback();
-                }
-                let delta = value - old;
-                if (delta < 0) {
-                    if (statDP[args.id].sumIgnoreMinus) {
-                        delta = 0;
-                    } else {
-                        // Counter overflow!
-                        delta = value; // Difference between last value and overflow is error rate
+    newSumDeltaValue(id, value) {
+        const isStart = !this.tasks.length;
+        /*
+            determine the consumption per period as consecutive meter readings.
+                 - Validity check new value must be greater than age
+                 - Subtraction with last value Day
+                 - Subtraction with last value today -> delta for sum
+                 - Add delta to all values
+                 - treat own values differently (datapoint name)
+        */
+        value = parseFloat(value) || 0; //here we can probably leave the 0, if undefined then we have 0
+        this.tasks.push({
+            name: 'async',
+            args: { id },
+            callback: (args, callback) => {
+                this.getValue('save.sumDelta.' + args.id + '.last', (err, old) => {
+                    if (!this.statDP[args.id]) {
+                        return callback && callback();
                     }
-                }
-                // delta auf 4 stellen hinter dem Komma begrenzen
-                delta = roundValue(delta, 4);
-                tasks.push({
-                    name: 'async',
-                    args: {
-                        delta,
-                        id: 'save.sumDelta.' + args.id + '.delta'
-                    },
-                    callback: (args, callback) => setValue(args.id, args.delta, callback)
-                });
 
-                for (let i = 0; i < nameObjects.sumDelta.temp.length; i++) {
-                    tasks.push({
+                    this.tasks.push({
+                        name: 'async',
+                        args: { id: 'save.sumDelta.' + args.id + '.last', value },
+                        callback: (args, callback) => this.setValue(args.id, args.value, callback)
+                    });
+                    if (old === null) {
+                        return callback();
+                    }
+                    let delta = value - old;
+                    if (delta < 0) {
+                        if (this.statDP[args.id].sumIgnoreMinus) {
+                            delta = 0;
+                        } else {
+                            // Counter overflow!
+                            delta = value; // Difference between last value and overflow is error rate
+                        }
+                    }
+                    // delta auf 4 stellen hinter dem Komma begrenzen
+                    delta = this.roundValue(delta, 4);
+                    this.tasks.push({
                         name: 'async',
                         args: {
                             delta,
-                            id: 'temp.sumDelta.' + args.id + '.' + nameObjects.sumDelta.temp[i],
-                            type: nameObjects.sumDelta.temp[i]
+                            id: 'save.sumDelta.' + args.id + '.delta'
                         },
-                        callback: (args, callback) =>
-                            getValue(args.id, (err, value, ts) => {
-                                // Check if the value not older than interval
-                                if (ts) {
-                                    value = checkValue(value, ts, args.id, args.type);
-                                }
-                                // value auf 4 stellen hinter dem Komma begrenzen
-                                value = roundValue((value || 0) + args.delta, 4);
-                                adapter.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.delta + ' to ' + value);
-                                setValue(args.id, value, callback);
-                            })
+                        callback: (args, callback) => this.setValue(args.id, args.delta, callback)
                     });
-                }
-                // calculate average
-                if (typeObjects.avg && typeObjects.avg.indexOf(args.id)) {
-                    newAvgValue(args.id, delta);
-                }
-                if (statDP[args.id].sumGroup &&
-                    groups[statDP[args.id].sumGroup] &&
-                    statDP[args.id].groupFactor
-                ) {
-                    const factor = statDP[args.id].groupFactor;
-                    const price = groups[statDP[args.id].sumGroup].config.price;
-                    for (let i = 0; i < nameObjects.sumGroup.temp.length; i++) {
-                        tasks.push({
+
+                    for (let i = 0; i < this.nameObjects.sumDelta.temp.length; i++) {
+                        this.tasks.push({
                             name: 'async',
                             args: {
-                                delta: delta * factor * price,
-                                id: 'temp.sumGroup.' + statDP[args.id].sumGroup + '.' + nameObjects.sumGroup.temp[i],
-                                type: nameObjects.sumGroup.temp[i]
+                                delta,
+                                id: 'temp.sumDelta.' + args.id + '.' + this.nameObjects.sumDelta.temp[i],
+                                type: this.nameObjects.sumDelta.temp[i]
                             },
                             callback: (args, callback) =>
-                                getValue(args.id, (err, value, ts) => {
+                                this.getValue(args.id, (err, value, ts) => {
                                     // Check if the value not older than interval
                                     if (ts) {
-                                        value = checkValue(value || 0, ts, args.id, args.type);
+                                        value = this.checkValue(value, ts, args.id, args.type);
                                     }
-                                    // value auf 4 stellen hinter dem Komma festgelegt
-                                    value = roundValue((value || 0) + args.delta, 4);
-                                    adapter.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.delta + ' to ' + value);
-                                    setValue(args.id, value, callback);
+                                    // value auf 4 stellen hinter dem Komma begrenzen
+                                    value = this.roundValue((value || 0) + args.delta, 4);
+                                    this.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.delta + ' to ' + value);
+                                    this.setValue(args.id, value, callback);
                                 })
                         });
                     }
-                }
-                callback();
-            });
-        }
-    });
-    isStart && processTasks();
-}
-
-function isTrueNew(id, val) { //detection if a count value is real or only from polling with same state
-    let newPulse = false;
-    getValue('temp.count.' + id + '.lastPulse', (err, value) => {
-        setValue('temp.count.' + id + '.lastPulse', val);
-        if (value === val) {
-            newPulse = false;
-            adapter.log.debug('new pulse false ? ' + newPulse);
-        } else {
-            newPulse = isTrue(val);
-            adapter.log.debug('new pulse true ? ' + newPulse);
-        }
-    });
-    return newPulse;
-}
-
-function isTrue(val) {
-    return val === 1 || val === '1' || val === true || val === 'true' || val === 'on' || val === 'ON';
-}
-
-function isFalse(val) {
-    return val === 0 || val === '0' || val === false || val === 'false' || val === 'off' || val === 'OFF' || val === 'standby'
-}
-function newTimeCntValue(id, state) {
-    const isStart = !tasks.length;
-    /*
-    value with threshold or state
-    Change to 1 at threshold 0 -> time between event since last 0
-    Addition of time
-    Change to 0 at threshold 1 -> time between event since last 1
-    Addition of time
-    no change but retrigger counts up the time of respective state
-    */
-    adapter.log.debug('[STATE CHANGE] timecount call ' + id + ' with ' + state.val); // !! val ist hier falsch da state komplett übergeben
-    if (isTrue(state.val)) {
-        tasks.push({
-            name: 'async',
-            args: {
-                id,
-                state
-            },
-            callback: (args, callback) => {
-                getValue('temp.timeCount.' + args.id + '.last', (err, actual) => { //Bestimmung letzter Zustand, wegen mehrfach gleicher Wert
-                    if (!isTrue(actual)) { // ein echter Signalwechsel, somit Bestimmung delta für OFF-Zeitraum von 1->0 bis jetzt 0->1
-                        getValue('temp.timeCount.' + args.id + '.last10', (err, last) => {
-                            let delta = last ? state.ts - last : 0; // wenn last true dann delta, ansonsten 0
-                            if (delta < 0) {
-                                delta = 0;
-                            } else {
-                                delta = Math.floor(delta / 1000);
-                            }
-                            adapter.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
-                            setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
-                                adapter.log.debug('[STATE CHANGE] new last01 ' + 'temp.timeCount.' + args.id + '.last01' + ': ' + state.ts + '  '+ timeConverter(state.ts) );
-                                setValue('temp.timeCount.' + args.id + '.last01', state.ts, () => {
-                                    adapter.log.debug('[STATE CHANGE] 0->1 delta ' + delta + ' state ' + timeConverter(state.ts) + ' last ' + timeConverter(last));
-                                    for (let s = 0; s < nameObjects.timeCount.temp.length; s++) { // über alle Zeiträume den Wert aufaddieren
-                                        if (nameObjects.timeCount.temp[s].match(/off\w+$/)) {
-                                            tasks.push({
-                                                name: 'async',
-                                                args: {
-                                                    id: 'temp.timeCount.' + args.id + '.' + nameObjects.timeCount.temp[s]
-                                                },
-                                                callback: (args, callback) => {
-                                                    getValue(args.id, (err, time) => {
-                                                        adapter.log.debug('[STATE CHANGE] 0->1 new val ' + args.id + ': ' + ((time || 0) + delta));
-                                                        setValue(args.id, (time || 0) + delta, callback)
-                                                    })
-                                                }
-                                            });
-                                        }
-                                    }
-                                    callback();
-                                });
-                            });
-                        });
+                    // calculate average
+                    if (this.typeObjects.avg && this.typeObjects.avg.indexOf(args.id)) {
+                        this.newAvgValue(args.id, delta);
                     }
-                    else { // kein Signalwechsel, nochmal gleicher Zustand, somit Bestimmung delta für update ON-Zeitraum von letzten 0->1 bis jetzt 0->1
-                        getValue('temp.timeCount.' + args.id + '.last01', (err, last) => {
-                            let delta = last ? state.ts - last : 0; // wenn last true dann delta, ansonsten 0
-                            if (delta < 0) {
-                                delta = 0
-                            } else {
-                                delta = Math.floor(delta / 1000);
-                            }
-                            adapter.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
-                            setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
-                                adapter.log.debug('[STATE CHANGE] new last01 ' + 'temp.timeCount.' + args.id + '.last01' + ': ' + state.ts + '  '+ timeConverter(state.ts));
-                                setValue('temp.timeCount.' + args.id + '.last01', state.ts, () => {
-                                    adapter.log.debug('[STATE EQUAL] 1->1 delta ' + delta + ' state ' + timeConverter(state.ts) + ' last ' + timeConverter(last));
-                                    for (let s = 0; s < nameObjects.timeCount.temp.length; s++) { // über alle Zeiträume den Wert aufaddieren
-                                        if (nameObjects.timeCount.temp[s].match(/^on\w+$/)) { // ^ wegen on in Month
-                                            tasks.push({
-                                                name: 'async',
-                                                args: {
-                                                    id: 'temp.timeCount.' + args.id + '.' + nameObjects.timeCount.temp[s]
-                                                },
-                                                callback: (args, callback) => {
-                                                    getValue(args.id, (err, time) => {
-                                                        adapter.log.debug('[STATE EQUAL] 1->1 new val ' + args.id + ': ' + ((time || 0) + delta));
-                                                        setValue(args.id, (time || 0) + delta, callback)
-                                                    })
-                                                }
-                                            });
+                    if (this.statDP[args.id].sumGroup &&
+                        this.groups[this.statDP[args.id].sumGroup] &&
+                        this.statDP[args.id].groupFactor
+                    ) {
+                        const factor = this.statDP[args.id].groupFactor;
+                        const price = this.groups[this.statDP[args.id].sumGroup].config.price;
+                        for (let i = 0; i < this.nameObjects.sumGroup.temp.length; i++) {
+                            this.tasks.push({
+                                name: 'async',
+                                args: {
+                                    delta: delta * factor * price,
+                                    id: 'temp.sumGroup.' + this.statDP[args.id].sumGroup + '.' + this.nameObjects.sumGroup.temp[i],
+                                    type: this.nameObjects.sumGroup.temp[i]
+                                },
+                                callback: (args, callback) =>
+                                    this.getValue(args.id, (err, value, ts) => {
+                                        // Check if the value not older than interval
+                                        if (ts) {
+                                            value = this.checkValue(value || 0, ts, args.id, args.type);
                                         }
-                                    }
-                                    callback();
-                                });
+                                        // value auf 4 stellen hinter dem Komma festgelegt
+                                        value = this.roundValue((value || 0) + args.delta, 4);
+                                        this.log.debug('[STATE CHANGE] Increase ' + args.id + ' on ' + args.delta + ' to ' + value);
+                                        this.setValue(args.id, value, callback);
+                                    })
                             });
-                        });
+                        }
                     }
+                    callback();
                 });
             }
         });
-    } else
-        if (isFalse(state.val)) {
-            tasks.push({
+        isStart && this.processTasks();
+    }
+
+    isTrueNew(id, val) { //detection if a count value is real or only from polling with same state
+        let newPulse = false;
+        this.getValue('temp.count.' + id + '.lastPulse', (err, value) => {
+            this.setValue('temp.count.' + id + '.lastPulse', val);
+            if (value === val) {
+                newPulse = false;
+                this.log.debug('new pulse false ? ' + newPulse);
+            } else {
+                newPulse = this.isTrue(val);
+                this.log.debug('new pulse true ? ' + newPulse);
+            }
+        });
+        return newPulse;
+    }
+
+    isTrue(val) {
+        return val === 1 || val === '1' || val === true || val === 'true' || val === 'on' || val === 'ON';
+    }
+
+    isFalse(val) {
+        return val === 0 || val === '0' || val === false || val === 'false' || val === 'off' || val === 'OFF' || val === 'standby';
+    }
+
+    newTimeCntValue(id, state) {
+        const isStart = !this.tasks.length;
+        /*
+        value with threshold or state
+        Change to 1 at threshold 0 -> time between event since last 0
+        Addition of time
+        Change to 0 at threshold 1 -> time between event since last 1
+        Addition of time
+        no change but retrigger counts up the time of respective state
+        */
+        this.log.debug('[STATE CHANGE] timecount call ' + id + ' with ' + state.val); // !! val ist hier falsch da state komplett übergeben
+        if (this.isTrue(state.val)) {
+            this.tasks.push({
                 name: 'async',
                 args: {
                     id,
                     state
                 },
                 callback: (args, callback) => {
-                    getValue('temp.timeCount.' + args.id + '.last', (err, actual) => { //Bestimmung letzter Zustand, wegen mehrfach gleicher Wert
-                        if (isTrue(actual)) { // ein echter Signalwechsel, somit Bestimmung delta für ON-Zeitraum von 0->1 bis jetzt 1->0
-                            getValue('temp.timeCount.' + args.id + '.last01', (err, last) => {
+                    this.getValue('temp.timeCount.' + args.id + '.last', (err, actual) => { //Bestimmung letzter Zustand, wegen mehrfach gleicher Wert
+                        if (!this.isTrue(actual)) { // ein echter Signalwechsel, somit Bestimmung delta für OFF-Zeitraum von 1->0 bis jetzt 0->1
+                            this.getValue('temp.timeCount.' + args.id + '.last10', (err, last) => {
+                                let delta = last ? state.ts - last : 0; // wenn last true dann delta, ansonsten 0
+                                if (delta < 0) {
+                                    delta = 0;
+                                } else {
+                                    delta = Math.floor(delta / 1000);
+                                }
+                                this.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
+                                this.setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
+                                    this.log.debug('[STATE CHANGE] new last01 ' + 'temp.timeCount.' + args.id + '.last01' + ': ' + state.ts + '  ' + this.timeConverter(state.ts) );
+                                    this.setValue('temp.timeCount.' + args.id + '.last01', state.ts, () => {
+                                        this.log.debug('[STATE CHANGE] 0->1 delta ' + delta + ' state ' + this.timeConverter(state.ts) + ' last ' + this.timeConverter(last));
+                                        for (let s = 0; s < this.nameObjects.timeCount.temp.length; s++) { // über alle Zeiträume den Wert aufaddieren
+                                            if (this.nameObjects.timeCount.temp[s].match(/off\w+$/)) {
+                                                this.tasks.push({
+                                                    name: 'async',
+                                                    args: {
+                                                        id: 'temp.timeCount.' + args.id + '.' + this.nameObjects.timeCount.temp[s]
+                                                    },
+                                                    callback: (args, callback) => {
+                                                        this.getValue(args.id, (err, time) => {
+                                                            this.log.debug('[STATE CHANGE] 0->1 new val ' + args.id + ': ' + ((time || 0) + delta));
+                                                            this.setValue(args.id, (time || 0) + delta, callback);
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        callback();
+                                    });
+                                });
+                            });
+                        }
+                        else { // kein Signalwechsel, nochmal gleicher Zustand, somit Bestimmung delta für update ON-Zeitraum von letzten 0->1 bis jetzt 0->1
+                            this.getValue('temp.timeCount.' + args.id + '.last01', (err, last) => {
+                                let delta = last ? state.ts - last : 0; // wenn last true dann delta, ansonsten 0
+                                if (delta < 0) {
+                                    delta = 0;
+                                } else {
+                                    delta = Math.floor(delta / 1000);
+                                }
+                                this.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
+                                this.setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
+                                    this.log.debug('[STATE CHANGE] new last01 ' + 'temp.timeCount.' + args.id + '.last01' + ': ' + state.ts + '  ' + this.timeConverter(state.ts));
+                                    this.setValue('temp.timeCount.' + args.id + '.last01', state.ts, () => {
+                                        this.log.debug('[STATE EQUAL] 1->1 delta ' + delta + ' state ' + this.timeConverter(state.ts) + ' last ' + this.timeConverter(last));
+                                        for (let s = 0; s < this.nameObjects.timeCount.temp.length; s++) { // über alle Zeiträume den Wert aufaddieren
+                                            if (this.nameObjects.timeCount.temp[s].match(/^on\w+$/)) { // ^ wegen on in Month
+                                                this.tasks.push({
+                                                    name: 'async',
+                                                    args: {
+                                                        id: 'temp.timeCount.' + args.id + '.' + this.nameObjects.timeCount.temp[s]
+                                                    },
+                                                    callback: (args, callback) => {
+                                                        this.getValue(args.id, (err, time) => {
+                                                            this.log.debug('[STATE EQUAL] 1->1 new val ' + args.id + ': ' + ((time || 0) + delta));
+                                                            this.setValue(args.id, (time || 0) + delta, callback);
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        callback();
+                                    });
+                                });
+                            });
+                        }
+                    });
+                }
+            });
+        } else if (this.isFalse(state.val)) {
+            this.tasks.push({
+                name: 'async',
+                args: {
+                    id,
+                    state
+                },
+                callback: (args, callback) => {
+                    this.getValue('temp.timeCount.' + args.id + '.last', (err, actual) => { //Bestimmung letzter Zustand, wegen mehrfach gleicher Wert
+                        if (this.isTrue(actual)) { // ein echter Signalwechsel, somit Bestimmung delta für ON-Zeitraum von 0->1 bis jetzt 1->0
+                            this.getValue('temp.timeCount.' + args.id + '.last01', (err, last) => {
                                 let delta = last ? state.ts - last : 0;
                                 if (delta < 0) {
                                     delta = 0;
                                 } else {
                                     delta = Math.floor(delta / 1000);
                                 }
-                                adapter.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
-                                setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
-                                    adapter.log.debug('[STATE CHANGE] new last10 ' + 'temp.timeCount.' + args.id + '.last10' + ': ' + state.ts + '  '+ timeConverter(state.ts));
-                                    setValue('temp.timeCount.' + args.id + '.last10', state.ts, () => {
-                                        adapter.log.debug('[STATE CHANGE] 1->0 delta ' + delta + ' state ' + timeConverter(state.ts) + ' last ' + timeConverter(last));
-                                        for (let s = 0; s < nameObjects.timeCount.temp.length; s++) {
-                                            if (nameObjects.timeCount.temp[s].match(/^on\w+$/)) { // on auch in Month drin, deswegen ^
-                                                tasks.push({
+                                this.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
+                                this.setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
+                                    this.log.debug('[STATE CHANGE] new last10 ' + 'temp.timeCount.' + args.id + '.last10' + ': ' + state.ts + '  ' + this.timeConverter(state.ts));
+                                    this.setValue('temp.timeCount.' + args.id + '.last10', state.ts, () => {
+                                        this.log.debug('[STATE CHANGE] 1->0 delta ' + delta + ' state ' + this.timeConverter(state.ts) + ' last ' + this.timeConverter(last));
+                                        for (let s = 0; s < this.nameObjects.timeCount.temp.length; s++) {
+                                            if (this.nameObjects.timeCount.temp[s].match(/^on\w+$/)) { // on auch in Month drin, deswegen ^
+                                                this.tasks.push({
                                                     name: 'async',
                                                     args: {
-                                                        id: 'temp.timeCount.' + args.id + '.' + nameObjects.timeCount.temp[s]
+                                                        id: 'temp.timeCount.' + args.id + '.' + this.nameObjects.timeCount.temp[s]
                                                     },
                                                     callback: (args, callback) => {
-                                                        getValue(args.id, (err, time) => {
-                                                            adapter.log.debug('[STATE CHANGE] 1->0 new val ' + args.id + ': ' + ((time || 0) + delta));
-                                                            setValue(args.id, (time || 0) + delta, callback)
-                                                        })
+                                                        this.getValue(args.id, (err, time) => {
+                                                            this.log.debug('[STATE CHANGE] 1->0 new val ' + args.id + ': ' + ((time || 0) + delta));
+                                                            this.setValue(args.id, (time || 0) + delta, callback);
+                                                        });
                                                     }
                                                 });
                                             }
@@ -855,30 +848,30 @@ function newTimeCntValue(id, state) {
                             });
                         }
                         else { // kein Signalwechsel, nochmal gleicher Zustand, somit Bestimmung delta für update OFF-Zeitraum von letzten 1->0 bis jetzt 1->0
-                            getValue('temp.timeCount.' + args.id + '.last10', (err, last) => {
+                            this.getValue('temp.timeCount.' + args.id + '.last10', (err, last) => {
                                 let delta = last ? state.ts - last : 0;
                                 if (delta < 0) {
                                     delta = 0;
                                 } else {
                                     delta = Math.floor(delta / 1000);
                                 }
-                                adapter.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
-                                setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
-                                    adapter.log.debug('[STATE CHANGE] new last10 ' + 'temp.timeCount.' + args.id + '.last10' + ': ' + state.ts + '  '+ timeConverter(state.ts) );
-                                    setValue('temp.timeCount.' + args.id + '.last10', state.ts, () => {
-                                        adapter.log.debug('[STATE EQUAL] 0->0 delta ' + delta + ' state ' + timeConverter(state.ts) + ' last ' + timeConverter(last));
-                                        for (let s = 0; s < nameObjects.timeCount.temp.length; s++) {
-                                            if (nameObjects.timeCount.temp[s].match(/off\w+$/)) {
-                                                tasks.push({
+                                this.log.debug('[STATE CHANGE] new last ' + 'temp.timeCount.' + args.id + '.last' + ': ' + state.val);
+                                this.setValue('temp.timeCount.' + args.id + '.last', state.val, () => { //setzen des last-Werte auf derzeitig verarbeiteten Wert
+                                    this.log.debug('[STATE CHANGE] new last10 ' + 'temp.timeCount.' + args.id + '.last10' + ': ' + state.ts + '  ' + this.timeConverter(state.ts) );
+                                    this.setValue('temp.timeCount.' + args.id + '.last10', state.ts, () => {
+                                        this.log.debug('[STATE EQUAL] 0->0 delta ' + delta + ' state ' + this.timeConverter(state.ts) + ' last ' + this.timeConverter(last));
+                                        for (let s = 0; s < this.nameObjects.timeCount.temp.length; s++) {
+                                            if (this.nameObjects.timeCount.temp[s].match(/off\w+$/)) {
+                                                this.tasks.push({
                                                     name: 'async',
                                                     args: {
-                                                        id: 'temp.timeCount.' + args.id + '.' + nameObjects.timeCount.temp[s]
+                                                        id: 'temp.timeCount.' + args.id + '.' + this.nameObjects.timeCount.temp[s]
                                                     },
                                                     callback: (args, callback) => {
-                                                        getValue(args.id, (err, time) => {
-                                                            adapter.log.debug('[STATE EQUAL] 0->0 new val ' + args.id + ': ' + ((time || 0) + delta));
-                                                            setValue(args.id, (time || 0) + delta, callback)
-                                                        })
+                                                        this.getValue(args.id, (err, time) => {
+                                                            this.log.debug('[STATE EQUAL] 0->0 new val ' + args.id + ': ' + ((time || 0) + delta));
+                                                            this.setValue(args.id, (time || 0) + delta, callback);
+                                                        });
                                                     }
                                                 });
                                             }
@@ -892,931 +885,943 @@ function newTimeCntValue(id, state) {
                 }
             });
         }
-    isStart && processTasks();
-}
-// normales Umspeichern, temp wird auf 0 gesetzt!!
-function copyValue(args, callback) {
-    getValue(args.temp, (err, value) => {
-        if (value !== null && value !== undefined) {
-            adapter.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value);
-            value = value || 0; // protect against NaN
-            setValueStat(args.save, value, () =>
-                setValue(args.temp, 0, callback));
-        } else {
-            adapter.log.debug('[SAVE VALUES] Process ' + args.temp + ' => no value found');
-            callback && callback();
+        isStart && this.processTasks();
+    }
+    // normales Umspeichern, temp wird auf 0 gesetzt!!
+    copyValue(args, callback) {
+        this.getValue(args.temp, (err, value) => {
+            if (value !== null && value !== undefined) {
+                this.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value);
+                value = value || 0; // protect against NaN
+                this.setValueStat(args.save, value, () =>
+                    this.setValue(args.temp, 0, callback));
+            } else {
+                this.log.debug('[SAVE VALUES] Process ' + args.temp + ' => no value found');
+                callback && callback();
+            }
+        });
+    }
+
+    // Setzen der Ausgangspunkte für Min/Maxmit aktuelle Wert, anstatt mit 0
+    copyValueActMinMax(args, callback) {
+        this.getValue(args.temp, (err, value) => {
+            if (value !== null && value !== undefined) {
+                this.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' +args.save);
+                value = value || 0; // protect against NaN
+                this.setValueStat(args.save, value, () =>
+                    this.getValue(args.actual, (err, actual) => {
+                        this.log.debug('[SET DAILY START MINMAX] Process ' + args.temp + ' = ' + actual + ' from ' + args.actual);
+                        this.setValue(args.temp, actual, callback);
+                    }));
+            } else {
+                this.log.debug('[SAVE VALUES & SET DAILY START MINMAX] Process ' + args.temp + ' => no value found');
+                callback && callback();
+            }
+        });
+    }
+
+    // für gruppenwerte
+    copyValueRound(args, callback) {
+        this.getValue(args.temp, (err, value) => {
+            if (value !== null && value !== undefined) {
+                this.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' + args.save);
+                this.setValueStat(args.save, this.roundValue(value, 4), () =>
+                    this.setValue(args.temp, 0, callback));
+            } else {
+                this.log.debug('[SAVE VALUES] Process ' + args.temp + ' => no value found');
+                callback && callback();
+            }
+        });
+    }
+
+    // avg Werte umspeichern und auf 0 setzen
+    copyValue0(args, callback) {
+        this.getValue(args.temp, (err, value) => {
+            value = value || 0;
+            this.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' + args.save);
+            this.setValueStat(args.save, value, () =>
+                this.setValue(args.temp, 0, callback));
+        });
+    }
+
+    // Betriebszeitzählung umspeichern und temp Werte auf 0 setzen
+    copyValue1000(args, callback) {
+        this.getValue(args.temp, (err, value) => {
+            //value = Math.floor((value || 0) / 1000);
+            this.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' + args.save);
+            this.setValueStat(args.save, value, () =>
+                this.setValue(args.temp, 0, callback));
+        });
+    }
+
+    setTimeCountMidnight() {
+        if (this.typeObjects.timeCount) {
+            for (let s = 0; s < this.typeObjects.timeCount.length; s++) {
+                const id = this.typeObjects.timeCount[s];
+                // bevor umgespeichert wird, muß noch ein Aufruf mit actual erfolgen, damit die restliche Zeit vom letzten Signalwechsel bis Mitternacht erfolgt
+                // aufruf von newTimeCntValue(id, "last") damit wird gleicher Zustand getriggert und last01 oder last10 zu Mitternacht neu gesetzt
+                this.getForeignState(this.namespace + '.temp.timeCount.' + id + '.last', (err, last) => { //hier muss nur id stehen, dann aber noch Beachtung des Timestamps
+                    //evtl. status ermitteln und dann setForeignState nochmals den Zustand schreiben um anzutriggern und aktuelle Zeit zu verwenden (bzw. 00:00:00)
+                    const ts = new Date();
+                    //ts.setMinutes(ts.getMinutes() - 1);
+                    //ts.setSeconds(59);
+                    //ts.setMilliseconds(0);
+                    if (last) {
+                        last.ts = ts.getTime();
+                        this.newTimeCntValue(id, last);
+                    }
+                });
+            }
         }
-    });
-}
+    }
 
-// Setzen der Ausgangspunkte für Min/Maxmit aktuelle Wert, anstatt mit 0
-function copyValueActMinMax(args, callback) {
-    getValue(args.temp, (err, value) => {
-        if (value !== null && value !== undefined) {
-            adapter.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' +args.save);
-            value = value || 0; // protect against NaN
-            setValueStat(args.save, value, () =>
-                getValue(args.actual, (err, actual) => {
-                    adapter.log.debug('[SET DAILY START MINMAX] Process ' + args.temp + ' = ' + actual + ' from ' + args.actual);
-                    setValue(args.temp, actual, callback)
-                }));
-        } else {
-            adapter.log.debug('[SAVE VALUES & SET DAILY START MINMAX] Process ' + args.temp + ' => no value found');
-            callback && callback();
+    // Store values to "save" for specific period
+    saveValues(timePeriod) {
+        const isStart = !this.tasks.length;
+        const dayTypes = [];
+        for (const key in this.typeObjects) {
+            if (this.typeObjects.hasOwnProperty(key) &&
+                this.typeObjects[key] &&
+                this.typeObjects[key].length &&
+                this.copyToSave.indexOf(key) !== -1
+            ) {
+                dayTypes.push(key);
+            }
         }
-    });
-}
+        const day = this.column.indexOf(timePeriod);  // nameObjects[day] contains the time-related object value
+        // all values
+        this.log.debug('[SAVE VALUES] saving ' + timePeriod + ' values');
 
-// für gruppenwerte
-function copyValueRound(args, callback) {
-    getValue(args.temp, (err, value) => {
-        if (value !== null && value !== undefined) {
-            adapter.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' + args.save);
-            setValueStat(args.save, roundValue(value, 4), () =>
-                setValue(args.temp, 0, callback));
-        } else {
-            adapter.log.debug('[SAVE VALUES] Process ' + args.temp + ' => no value found');
-            callback && callback();
+        // Schleife für alle Werte die durch day-variable bestimmt sind, gilt durch copyToSave für 'count', 'sumCount', 'sumGroup', 'sumDelta'
+        // avg, timeCount /fivemin braucht extra Behandlung
+        for (let t = 0; t < dayTypes.length; t++) {
+            for (let s = 0; s < this.typeObjects[dayTypes[t]].length; s++) {
+                // ignore last5min
+                if (this.nameObjects[dayTypes[t]].temp[day] === 'last5Min') continue;
+                const id = this.typeObjects[dayTypes[t]][s];
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.' + dayTypes[t] + '.' + id + '.' + this.nameObjects[dayTypes[t]].temp[day],
+                        save: 'save.' + dayTypes[t] + '.' + id + '.' + this.nameObjects[dayTypes[t]].temp[day]
+                    },
+                    callback: dayTypes[t] === 'sumGroup' ? this.copyValueRound : this.copyValue
+                });
+            }
         }
-    });
-}
 
-// avg Werte umspeichern und auf 0 setzen
-function copyValue0(args, callback) {
-    getValue(args.temp, (err, value) => {
-        value = value || 0;
-        adapter.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' + args.save);
-        setValueStat(args.save, value, () =>
-            setValue(args.temp, 0, callback));
-    });
-}
+        // avg values sind nur Tageswerte, also nur bei 'day' auszuwerten
+        // Setzen auf den aktuellen Wert fehlt noch irgendwie ? jetz copyValueActMinMAx
+        if (timePeriod === 'day' && this.typeObjects.avg) {
+            for (let s = 0; s < this.typeObjects.avg.length; s++) {
+                const id = this.typeObjects.avg[s];
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.avg.' + id + '.dayMin',
+                        save: 'save.avg.' + id + '.dayMin',
+                        actual: 'temp.avg.' + id + '.last',
+                    },
+                    callback: this.copyValueActMinMax
+                });
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.avg.' + id + '.dayMax',
+                        save: 'save.avg.' + id + '.dayMax',
+                        actual: 'temp.avg.' + id + '.last',
+                    },
+                    callback: this.copyValueActMinMax
+                });
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.avg.' + id + '.dayAvg',
+                        save: 'save.avg.' + id + '.dayAvg',
+                    },
+                    callback: this.copyValue0
+                });
+                // just reset the counter
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.avg.' + id + '.dayCount'
+                    },
+                    callback: (args, callback) => this.setValueStat(args.temp, 0, callback)
+                });
+                // just reset the counter
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.avg.' + id + '.daySum'
+                    },
+                    callback: (args, callback) => this.setValueStat(args.temp, 0, callback)
+                });
+            }
+        }
 
-// Betriebszeitzählung umspeichern und temp Werte auf 0 setzen
-function copyValue1000(args, callback) {
-    getValue(args.temp, (err, value) => {
-        //value = Math.floor((value || 0) / 1000);
-        adapter.log.debug('[SAVE VALUES] Process ' + args.temp + ' = ' + value + ' to ' + args.save);
-        setValueStat(args.save, value, () =>
-            setValue(args.temp, 0, callback));
-    });
-}
+        // saving the dayly fiveMin max/min
+        // Setzen auf den aktuellen Wert fehlt noch irgendwie ?
+        if (timePeriod === 'day' && this.typeObjects.fiveMin) {
+            for (let s = 0; s < this.typeObjects.fiveMin.length; s++) {
+                const id = this.typeObjects.fiveMin[s];
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.fiveMin.' + id + '.dayMin5Min',
+                        save: 'save.fiveMin.' + id + '.dayMin5Min'
+                    },
+                    callback: this.copyValue
+                });
+                this.tasks.push({
+                    name: 'async',
+                    args: {
+                        temp: 'temp.fiveMin.' + id + '.dayMax5Min',
+                        save: 'save.fiveMin.' + id + '.dayMax5Min'
+                    },
+                    callback: this.copyValue
+                });
+            }
+        }
 
-function setTimeCountMidnight() {
-    if (typeObjects.timeCount) {
-        for (let s = 0; s < typeObjects.timeCount.length; s++) {
-            const id = typeObjects.timeCount[s];
-            //bevor umgespeichert wird, muß noch ein Aufruf mit actual erfolgen, damit die restliche Zeit vom letzten Signalwechsel bis Mitternacht erfolgt
-            //aufruf von newTimeCntValue(id, "last") damit wird gleicher Zustand getriggert und last01 oder last10 zu Mitternacht neu gesetzt
-            adapter.getForeignState(adapter.namespace + '.temp.timeCount.' + id + '.last', (err, last) => { //hier muss nur id stehen, dann aber noch Beachtung des Timestamps
-                //evtl. status ermitteln und dann setForeignState nochmals den Zustand schreiben um anzutriggern und aktuelle Zeit zu verwenden (bzw. 00:00:00)
-                let ts = new Date();
-                //ts.setMinutes(ts.getMinutes() - 1);
-                //ts.setSeconds(59);
-                //ts.setMilliseconds(0);
-                if (last) {
-                    last.ts = ts.getTime();
-                    newTimeCntValue(id, last);
+        // timeCount hat andere Objektbezeichnungen und deswegen kann day aus timeperiod nicht benutzt werden
+        // day erst ab 2ter Stelle im Array (ohne 15min und hour soll benutzt werden) -> also (day > 1) und [day-2]
+        if (day > 1) {
+            if (this.typeObjects.timeCount) {
+                for (let s = 0; s < this.typeObjects.timeCount.length; s++) {
+                    const id = this.typeObjects.timeCount[s];
+                    this.tasks.push({
+                        name: 'async',
+                        args: {
+                            temp: 'temp.timeCount.' + id + '.' + this.nameObjects.timeCount.temp[day - 2], // 0 ist onDay
+                            save: 'save.timeCount.' + id + '.' + this.nameObjects.timeCount.temp[day - 2],
+                        },
+                        callback: this.copyValue1000
+                    });
+                    this.tasks.push({
+                        name: 'async',
+                        args: {
+                            temp: 'temp.timeCount.' + id + '.' + this.nameObjects.timeCount.temp[day + 3], // +5 ist offDay
+                            save: 'save.timeCount.' + id + '.' + this.nameObjects.timeCount.temp[day + 3],
+                        },
+                        callback: this.copyValue1000
+                    });
                 }
-            });
-        }
-    }
-}
-
-
-const column = ['15Min', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
-const copyToSave = ['count', 'sumCount', 'sumGroup', 'sumDelta'];
-
-// Store values to "save" for specific period
-function saveValues(timePeriod) {
-    const isStart = !tasks.length;
-    const dayTypes = [];
-    for (const key in typeObjects) {
-        if (typeObjects.hasOwnProperty(key) &&
-            typeObjects[key] &&
-            typeObjects[key].length &&
-            copyToSave.indexOf(key) !== -1
-        ) {
-            dayTypes.push(key);
-        }
-    }
-    const day = column.indexOf(timePeriod);  // nameObjects[day] contains the time-related object value
-    // all values
-    adapter.log.debug('[SAVE VALUES] saving ' + timePeriod + ' values');
-
-    // Schleife für alle Werte die durch day-variable bestimmt sind, gilt durch copyToSave für 'count', 'sumCount', 'sumGroup', 'sumDelta'
-    // avg, timeCount /fivemin braucht extra Behandlung
-    for (let t = 0; t < dayTypes.length; t++) {
-        for (let s = 0; s < typeObjects[dayTypes[t]].length; s++) {
-            // ignore last5min
-            if (nameObjects[dayTypes[t]].temp[day] === 'last5Min') continue;
-            const id = typeObjects[dayTypes[t]][s];
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.' + dayTypes[t] + '.' + id + '.' + nameObjects[dayTypes[t]].temp[day],
-                    save: 'save.' + dayTypes[t] + '.' + id + '.' + nameObjects[dayTypes[t]].temp[day]
-                },
-                callback: dayTypes[t] === 'sumGroup' ? copyValueRound : copyValue
-            });
-        }
-    }
-
-    // avg values sind nur Tageswerte, also nur bei 'day' auszuwerten
-    // Setzen auf den aktuellen Wert fehlt noch irgendwie ? jetz copyValueActMinMAx
-    if (timePeriod === 'day' && typeObjects.avg) {
-        for (let s = 0; s < typeObjects.avg.length; s++) {
-            const id = typeObjects.avg[s];
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.avg.' + id + '.dayMin',
-                    save: 'save.avg.' + id + '.dayMin',
-                    actual: 'temp.avg.' + id + '.last',
-                },
-                callback: copyValueActMinMax
-            });
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.avg.' + id + '.dayMax',
-                    save: 'save.avg.' + id + '.dayMax',
-                    actual: 'temp.avg.' + id + '.last',
-                },
-                callback: copyValueActMinMax
-            });
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.avg.' + id + '.dayAvg',
-                    save: 'save.avg.' + id + '.dayAvg',
-                },
-                callback: copyValue0
-            });
-            // just reset the counter
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.avg.' + id + '.dayCount'
-                },
-                callback: (args, callback) => setValueStat(args.temp, 0, callback)
-            });
-            // just reset the counter
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.avg.' + id + '.daySum'
-                },
-                callback: (args, callback) => setValueStat(args.temp, 0, callback)
-            });
-        }
-    }
-
-    // saving the dayly fiveMin max/min
-    // Setzen auf den aktuellen Wert fehlt noch irgendwie ?
-    if (timePeriod === 'day' && typeObjects.fiveMin) {
-        for (let s = 0; s < typeObjects.fiveMin.length; s++) {
-            const id = typeObjects.fiveMin[s];
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.fiveMin.' + id + '.dayMin5Min',
-                    save: 'save.fiveMin.' + id + '.dayMin5Min'
-                },
-                callback: copyValue
-            });
-            tasks.push({
-                name: 'async',
-                args: {
-                    temp: 'temp.fiveMin.' + id + '.dayMax5Min',
-                    save: 'save.fiveMin.' + id + '.dayMax5Min'
-                },
-                callback: copyValue
-            });
-        }
-    }
-
-    // timeCount hat andere Objektbezeichnungen und deswegen kann day aus timeperiod nicht benutzt werden
-    // day erst ab 2ter Stelle im Array (ohne 15min und hour soll benutzt werden) -> also (day > 1) und [day-2]
-    if (day > 1) {
-        if (typeObjects.timeCount) {
-            for (let s = 0; s < typeObjects.timeCount.length; s++) {
-                const id = typeObjects.timeCount[s];
-                tasks.push({
-                    name: 'async',
-                    args: {
-                        temp: 'temp.timeCount.' + id + '.' + nameObjects.timeCount.temp[day - 2], // 0 ist onDay
-                        save: 'save.timeCount.' + id + '.' + nameObjects.timeCount.temp[day - 2],
-                    },
-                    callback: copyValue1000
-                });
-                tasks.push({
-                    name: 'async',
-                    args: {
-                        temp: 'temp.timeCount.' + id + '.' + nameObjects.timeCount.temp[day + 3], // +5 ist offDay
-                        save: 'save.timeCount.' + id + '.' + nameObjects.timeCount.temp[day + 3],
-                    },
-                    callback: copyValue1000
-                });
             }
         }
-    }
-    // minmax hat andere Objektbezeichnungen und deswegen kann day aus timeperiod nicht benutzt werden
-    // day erst ab 2ter Stelle im Array (ohne 15min und hour soll benutzt werden) -> also (day > 1) und [day-2]
-    if (day > 1) { //bezieht sich auf column array
-        if (typeObjects.minmax) {
-            for (let s = 0; s < typeObjects.minmax.length; s++) {
-                const id = typeObjects.minmax[s];
-                tasks.push({
-                    name: 'async',
-                    args: {
-                        temp: 'temp.minmax.' + id + '.' + nameObjects.minmax.temp[day - 2], // 0 ist minDay
-                        save: 'save.minmax.' + id + '.' + nameObjects.minmax.temp[day - 2],
-                        actual: 'temp.minmax.' + id + '.last',
-                    },
-                    callback: copyValueActMinMax
-                });
-                tasks.push({
-                    name: 'async',
-                    args: {
-                        temp: 'temp.minmax.' + id + '.' + nameObjects.minmax.temp[day + 3], // +5 ist maxDay
-                        save: 'save.minmax.' + id + '.' + nameObjects.minmax.temp[day + 3],
-                        actual: 'temp.minmax.' + id + '.last',
-                    },
-                    callback: copyValueActMinMax
-                });
+        // minmax hat andere Objektbezeichnungen und deswegen kann day aus timeperiod nicht benutzt werden
+        // day erst ab 2ter Stelle im Array (ohne 15min und hour soll benutzt werden) -> also (day > 1) und [day-2]
+        if (day > 1) { //bezieht sich auf column array
+            if (this.typeObjects.minmax) {
+                for (let s = 0; s < this.typeObjects.minmax.length; s++) {
+                    const id = this.typeObjects.minmax[s];
+                    this.tasks.push({
+                        name: 'async',
+                        args: {
+                            temp: 'temp.minmax.' + id + '.' + this.nameObjects.minmax.temp[day - 2], // 0 ist minDay
+                            save: 'save.minmax.' + id + '.' + this.nameObjects.minmax.temp[day - 2],
+                            actual: 'temp.minmax.' + id + '.last',
+                        },
+                        callback: this.copyValueActMinMax
+                    });
+                    this.tasks.push({
+                        name: 'async',
+                        args: {
+                            temp: 'temp.minmax.' + id + '.' + this.nameObjects.minmax.temp[day + 3], // +5 ist maxDay
+                            save: 'save.minmax.' + id + '.' + this.nameObjects.minmax.temp[day + 3],
+                            actual: 'temp.minmax.' + id + '.last',
+                        },
+                        callback: this.copyValueActMinMax
+                    });
+                }
             }
         }
+        isStart && this.processTasks();
     }
-    isStart && processTasks();
-}
 
-function setInitial(type, id) {
-    // if values have not already been logged from the last adapter start,
-    // then fill them with '0' so that the read does not hit the values undefined.
-    const nameObjectType = nameObjects[type];
-    const objects = nameObjectType.temp;
-    const isStart = !tasks.length;
-    for (let s = 0; s < objects.length; s++) {
-        tasks.push({
-            name: 'async',
-            args: {
-                name: objects[s],
-                id: 'temp.' + type + '.' + id + '.' + objects[s],
-                trueId: id,
-                type
-            },
-            wait: true,
-            callback: (args, callback) => {
-                adapter.log.debug('[SET INITIAL] ' + args.trueId + ' ' + args.type + ' ' + args.name);
-                getValue(args.id, (err, value) => {
-                    adapter.log.debug('[SET INITIAL] ' + args.trueId + ' value ' + args.id + ' exists ?  ' + value + ' in obj: ' + args.id);
-                    if (value === null) {
-                        adapter.log.debug('[SET INITIAL] ' + args.trueId + ' replace with 0 -> ' + args.id);
-                        if (args.type === 'avg') {
-                            if (args.name === 'dayCount') {
-                                adapter.getForeignState(args.trueId, (er, value) => {
+    setInitial(type, id) {
+        // if values have not already been logged from the last adapter start,
+        // then fill them with '0' so that the read does not hit the values undefined.
+        const nameObjectType = this.nameObjects[type];
+        const objects = nameObjectType.temp;
+        const isStart = !this.tasks.length;
+        for (let s = 0; s < objects.length; s++) {
+            this.tasks.push({
+                name: 'async',
+                args: {
+                    name: objects[s],
+                    id: 'temp.' + type + '.' + id + '.' + objects[s],
+                    trueId: id,
+                    type
+                },
+                wait: true,
+                callback: (args, callback) => {
+                    this.log.debug('[SET INITIAL] ' + args.trueId + ' ' + args.type + ' ' + args.name);
+                    this.getValue(args.id, (err, value) => {
+                        this.log.debug('[SET INITIAL] ' + args.trueId + ' value ' + args.id + ' exists ?  ' + value + ' in obj: ' + args.id);
+                        if (value === null) {
+                            this.log.debug('[SET INITIAL] ' + args.trueId + ' replace with 0 -> ' + args.id);
+                            if (args.type === 'avg') {
+                                if (args.name === 'dayCount') {
+                                    this.getForeignState(args.trueId, (er, value) => {
+                                        if (value && value.val !== null) {
+                                            this.setValue(args.id, 1, callback);
+                                        } else {
+                                            callback();
+                                        }
+                                    });
+                                } else {
+                                    this.getForeignState(args.trueId, (er, value) => { // get current value to set for initial min, max, last
+                                        if (value && value.val !== null) {
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' object ' + args.trueId + ' ' + args.name);
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + value.val);
+                                            this.setValue(args.id, value.val, callback);
+                                        } else {
+                                            callback();
+                                        }
+                                    });
+                                }
+                            } else if (args.type === 'minmax') {
+                                this.getForeignState(args.trueId, (er, value) => { // get current value to set for initial min, max, last
                                     if (value && value.val !== null) {
-                                        setValue(args.id, 1, callback);
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' object ' + args.trueId + ' ' + args.name);
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + value.val);
+                                        this.setValue(args.id, value.val, callback);
                                     } else {
                                         callback();
                                     }
                                 });
                             } else {
-                                adapter.getForeignState(args.trueId, (er, value) => { // get current value to set for initial min, max, last
-                                    if (value && value.val !== null) {
-                                        adapter.log.debug('[SET INITIAL] ' + args.trueId + ' object ' + args.trueId + ' ' + args.name);
-                                        adapter.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + value.val);
-                                        setValue(args.id, value.val, callback);
-                                    } else {
-                                        callback();
-                                    }
-                                });
-                            }
-                        } else if (args.type === 'minmax') {
-                            adapter.getForeignState(args.trueId, (er, value) => { // get current value to set for initial min, max, last
-                                if (value && value.val !== null) {
-                                    adapter.log.debug('[SET INITIAL] ' + args.trueId + ' object ' + args.trueId + ' ' + args.name);
-                                    adapter.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + value.val);
-                                    setValue(args.id, value.val, callback);
-                                } else {
-                                    callback();
-                                }
-                            });
-                        } else {
-                            if (args.name === 'last01') {
-                                adapter.getForeignState(args.trueId, (err, state) => { // get current value
-                                    adapter.log.debug('[SET INITIAL] ' + args.trueId + ' object ' + args.trueId + ' ' + args.name);
-                                    adapter.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
-                                    if (isFalse(state && state.val)) {
-                                        adapter.log.debug('[SET INITIAL] ' + args.trueId + ' state is false und last 01 now as lastChange');
-                                        setValue(args.id, Date.now(), callback);
-                                        setValue(args.id, Date.now(), callback);
-                                    } else
-                                    if (isTrue(state && state.val)) {
-                                        adapter.log.debug('[SET INITIAL] ' + args.trueId + ' state is false und last 01  get old time');
-                                        setValue(args.id, state.lc, callback);
-                                    } else {
-                                        adapter.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in timeCount');
-                                        callback();
-                                    }
-                                });
-                            } else
-                                if (args.name === 'last10') {
-                                    adapter.getForeignState(args.trueId, (err, state) => { // get actual values
-                                        adapter.log.debug('[SET INITIAL] ' + args.trueId + ' objects ' + args.trueId + ' ' + args.name);
-                                        adapter.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
-                                        if (isFalse(state && state.val)) {
-                                            setValue(args.id, state.lc, callback);
-                                            adapter.log.debug('[SET INITIAL] ' + args.trueId + ' state is false and last 10 get old time');
+                                if (args.name === 'last01') {
+                                    this.getForeignState(args.trueId, (err, state) => { // get current value
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' object ' + args.trueId + ' ' + args.name);
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
+                                        if (this.isFalse(state && state.val)) {
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' state is false und last 01 now as lastChange');
+                                            this.setValue(args.id, Date.now(), callback);
+                                            this.setValue(args.id, Date.now(), callback);
                                         } else
-                                        if (isTrue(state && state.val)) {
-                                            setValue(args.id, Date.now(), callback);
-                                            adapter.log.debug('[SET INITIAL] ' + args.trueId + ' state is true and last 10 get now as lastChange');
+                                        if (this.isTrue(state && state.val)) {
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' state is false und last 01  get old time');
+                                            this.setValue(args.id, state.lc, callback);
                                         } else {
-                                            adapter.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in timeCount');
+                                            this.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in timeCount');
                                             callback();
                                         }
                                     });
                                 } else
-                                    if (args.name === 'lastPulse') {
-                                        adapter.getForeignState(args.trueId, (err, state) => { // get actual values
-                                            adapter.log.debug('[SET INITIAL] ' + args.trueId + ' objects ' + args.trueId + ' ' + args.name);
-                                            adapter.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
-                                            if (isTrue(state && state.val) || isFalse(state && state.val)) { //egal was drin ist, es muß zum Wertebereich passen und es wird auf den Wert von lastPulse gesetzt
-                                                setValue(args.id, state.val, callback);
-                                                adapter.log.debug('[SET INITIAL] ' + args.trueId + ' state was ' + state.val + ' and lastPulse get old time');
-                                            } else {
-                                                adapter.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in count');
-                                                callback();
-                                            }
-                                        });
-                                    } else
-                                        if (args.name === 'last') { // speichern des aktuellen Zustandes für timecount, sofern mit poll gleiche Zustände geholt werden und keinen Signalwechsel darstellen
-                                            adapter.getForeignState(args.trueId, (err, state) => { // get actual value for the state in timecount
-                                                adapter.log.debug('[SET INITIAL] ' + args.trueId + ' objects ' + args.trueId + ' ' + args.name);
-                                                adapter.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
-                                                if (isTrue(state && state.val) || isFalse(state && state.val)) { //egal was drin ist, es muß zum Wertebereich passen und es wird auf den Wert von lastPulse gesetzt
-                                                    setValue(args.id, state.val, callback);
-                                                    adapter.log.debug('[SET INITIAL] ' + args.trueId + ' state is ' + state.val + ' and set to last ');
-                                                } else {
-                                                    adapter.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in count');
-                                                    callback();
-                                                }
-                                            });
+                                if (args.name === 'last10') {
+                                    this.getForeignState(args.trueId, (err, state) => { // get actual values
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' objects ' + args.trueId + ' ' + args.name);
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
+                                        if (this.isFalse(state && state.val)) {
+                                            this.setValue(args.id, state.lc, callback);
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' state is false and last 10 get old time');
+                                        } else
+                                        if (this.isTrue(state && state.val)) {
+                                            this.setValue(args.id, Date.now(), callback);
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' state is true and last 10 get now as lastChange');
                                         } else {
+                                            this.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in timeCount');
                                             callback();
                                         }
+                                    });
+                                } else
+                                if (args.name === 'lastPulse') {
+                                    this.getForeignState(args.trueId, (err, state) => { // get actual values
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' objects ' + args.trueId + ' ' + args.name);
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
+                                        if (this.isTrue(state && state.val) || this.isFalse(state && state.val)) { //egal was drin ist, es muß zum Wertebereich passen und es wird auf den Wert von lastPulse gesetzt
+                                            this.setValue(args.id, state.val, callback);
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' state was ' + state.val + ' and lastPulse get old time');
+                                        } else {
+                                            this.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in count');
+                                            callback();
+                                        }
+                                    });
+                                } else
+                                if (args.name === 'last') { // speichern des aktuellen Zustandes für timecount, sofern mit poll gleiche Zustände geholt werden und keinen Signalwechsel darstellen
+                                    this.getForeignState(args.trueId, (err, state) => { // get actual value for the state in timecount
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' objects ' + args.trueId + ' ' + args.name);
+                                        this.log.debug('[SET INITIAL] ' + args.trueId + ' act value ' + (state && state.val) + ' time ' + (state && state.lc));
+                                        if (this.isTrue(state && state.val) || this.isFalse(state && state.val)) { //egal was drin ist, es muß zum Wertebereich passen und es wird auf den Wert von lastPulse gesetzt
+                                            this.setValue(args.id, state.val, callback);
+                                            this.log.debug('[SET INITIAL] ' + args.trueId + ' state is ' + state.val + ' and set to last ');
+                                        } else {
+                                            this.log.error('[SET INITIAL] ' + args.trueId + ' unknown state to be evaluated in count');
+                                            callback();
+                                        }
+                                    });
+                                } else {
+                                    callback();
+                                }
+                            }
+                        } else {
+                            callback();
                         }
-                    } else {
-                        callback();
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+        }
+        isStart && this.processTasks();
     }
-    isStart && processTasks();
-}
 
-function defineObject(type, id, name, unit) {
-    const isStart = !tasks.length;
-    // Create channels
-    tasks.push({
-        name: 'setObjectNotExists',
-        id: 'save.' + type + '.' + id,
-        obj: {
-            type: 'channel',
-            common: {
-                name: 'Save values for ' + name,
-                role: 'sensor'
-            },
-            native: {
-                addr: id
-            }
-        }
-    });
-    tasks.push({
-        name: 'setObjectNotExists',
-        id: 'temp.' + type + '.' + id,
-        obj: {
-            type: 'channel',
-            common: {
-                name: 'Temporary value for ' + name,
-                role: 'sensor',
-                // expert: true
-            },
-            native: {
-                addr: id
-            }
-        }
-    });
-
-    // states for the saved values
-    const nameObjectType = nameObjects[type];
-    let objects = nameObjectType.save;
-    for (let s = 0; s < objects.length; s++) {
-        if (!stateObjects[objects[s]]) {
-            adapter.log.error('[CREATION] State ' + objects[s] + ' unknown');
-            continue;
-        }
-        const obj = JSON.parse(JSON.stringify(stateObjects[objects[s]]));
-        if (!obj) {
-            adapter.log.error('[CREATION] Unknown state: ' + objects[s]);
-            continue;
-        }
-        obj.native.addr = id;
-        if (unit && objects[s] !== 'dayCount') {
-            obj.common.unit = unit;
-        }
-        tasks.push({
+    defineObject(type, id, name, unit) {
+        const isStart = !this.tasks.length;
+        // Create channels
+        this.tasks.push({
             name: 'setObjectNotExists',
-            id: 'save.' + type + '.' + id + '.' + objects[s],
-            obj
-        });
-    }
-
-    // states for the temporary values
-    objects = nameObjectType.temp;
-    for (let s = 0; s < objects.length; s++) {
-        if (!stateObjects[objects[s]]) {
-            adapter.log.error('[CREATION] State ' + objects[s] + ' unknown');
-            continue;
-        }
-        const obj = JSON.parse(JSON.stringify(stateObjects[objects[s]]));
-        if (!obj) {
-            adapter.log.error('[CREATION] Unknown state: ' + objects[s]);
-            continue;
-        }
-        obj.native.addr = id;
-        // obj.common.expert = true;
-        if (unit && objects[s] !== 'dayCount') {
-            obj.common.unit = unit;
-        } else if (obj.common.unit !== undefined) {
-            delete obj.common.unit;
-        }
-        tasks.push({
-            name: 'setObjectNotExists',
-            id: 'temp.' + type + '.' + id + '.' + objects[s],
-            obj
-        });
-    }
-    isStart && processTasks();
-    setInitial(type, id);
-}
-
-function setupObjects(ids, callback, isStart, noSubscribe) {
-    if (!ids || !ids.length) {
-        isStart && processTasks();
-        return callback && callback();
-    }
-    if (isStart === undefined) {
-        isStart = !tasks.length;
-    }
-    const id = ids.shift();
-    const obj = statDP[id];
-    if (!obj) {
-        return setImmediate(setupObjects, ids, callback, isStart);
-    }
-    let subscribed = !!noSubscribe;
-    if (!obj.groupFactor && obj.groupFactor !== '0' && obj.groupFactor !== 0) {
-        obj.groupFactor = parseFloat(adapter.config.groupFactor) || 1;
-    } else {
-        obj.groupFactor = parseFloat(obj.groupFactor) || 1;
-    }
-    if (!obj.impUnitPerImpulse && obj.impUnitPerImpulse !== '0' && obj.impUnitPerImpulse !== 0) {
-        obj.impUnitPerImpulse = parseInt(adapter.config.impUnitPerImpulse, 10) || 1;
-    } else {
-        obj.impUnitPerImpulse = parseInt(obj.impUnitPerImpulse, 10) || 1;
-    }
-    // merge der Kosten in den Datensatz
-    if (obj.sumGroup && ((obj.count && obj.sumCount) || obj.sumDelta)) {
-        groups[obj.sumGroup] = groups[obj.sumGroup] || { config: adapter.config.groups.find(g => g.id === obj.sumGroup), items: [] };
-        if (groups[obj.sumGroup].items.indexOf(id) === -1) {
-            groups[obj.sumGroup].items.push(id);
-        }
-    }
-
-    // Function is called with the custom objects
-    adapter.log.debug('[CREATION] ============================== ' + id + ' =============================');
-    adapter.log.debug('[CREATION] setup of object ' + JSON.stringify(obj));
-    const logName = obj.logName;
-    if (obj.avg && !obj.sumDelta) {
-        if (!typeObjects.avg || typeObjects.avg.indexOf(id) === -1) {
-            typeObjects.avg = typeObjects.avg || [];
-            typeObjects.avg.push(id);
-        }
-        defineObject('avg', id, logName); //type, id, name
-        tasks.push({
-            name: 'setObjectNotExists',
-            subscribe: !subscribed && id,
-            id: 'save.avg',
+            id: 'save.' + type + '.' + id,
             obj: {
                 type: 'channel',
                 common: {
-                    name: 'Average values',
+                    name: 'Save values for ' + name,
                     role: 'sensor'
                 },
-                native: {}
+                native: {
+                    addr: id
+                }
             }
         });
-        subscribed = true;
-    }
-    //	minmax over time
-    if (obj.minmax) {
-        if (!typeObjects.minmax || typeObjects.minmax.indexOf(id) === -1) {
-            typeObjects.minmax = typeObjects.minmax || [];
-            typeObjects.minmax.push(id);
-        }
-        defineObject('minmax', id, logName); //type, id, name
-        tasks.push({
+        this.tasks.push({
             name: 'setObjectNotExists',
-            subscribe: !subscribed && id,
-            id: 'save.minmax',
+            id: 'temp.' + type + '.' + id,
             obj: {
                 type: 'channel',
                 common: {
-                    name: 'MinMax values',
-                    role: 'sensor'
+                    name: 'Temporary value for ' + name,
+                    role: 'sensor',
+                    // expert: true
                 },
-                native: {}
+                native: {
+                    addr: id
+                }
             }
         });
-        subscribed = true;
-    }
-    // 5minutes Values can only be determined when counting
-    adapter.log.debug('[CREATION] fiveMin = ' + obj.fiveMin + ',  count =  ' + obj.count);
 
-    if (obj.fiveMin && obj.count) {
-        if (!typeObjects.fiveMin || typeObjects.fiveMin.indexOf(id) === -1) {
-            typeObjects.fiveMin = typeObjects.fiveMin || [];
-            typeObjects.fiveMin.push(id);
-        }
-        defineObject('fiveMin', id, logName); //type, id, name
-        tasks.push({
-            name: 'setObjectNotExists',
-            subscribe: !subscribed && id,
-            id: 'save.fiveMin',
-            obj: {
-                type: 'channel',
-                common: {
-                    name: '5min Consumption',
-                    role: 'sensor'
-                },
-                native: {}
+        // states for the saved values
+        const nameObjectType = this.nameObjects[type];
+        let objects = nameObjectType.save;
+        for (let s = 0; s < objects.length; s++) {
+            if (!stateObjects[objects[s]]) {
+                this.log.error('[CREATION] State ' + objects[s] + ' unknown');
+                continue;
             }
-        });
-        subscribed = true;
-    }
-
-    if (obj.timeCount) {
-        if (!typeObjects.timeCount || typeObjects.timeCount.indexOf(id) === -1) {
-            typeObjects.timeCount = typeObjects.timeCount || [];
-            typeObjects.timeCount.push(id);
-        }
-        defineObject('timeCount', id, logName); //type, id, name
-        tasks.push({
-            name: 'setObjectNotExists',
-            subscribe: !subscribed && id,
-            id: 'save.timeCount',
-            obj: {
-                type: 'channel',
-                common: {
-                    name: 'Operation time counter',
-                    role: 'sensor'
-                },
-                native: {}
+            const obj = JSON.parse(JSON.stringify(stateObjects[objects[s]]));
+            if (!obj) {
+                this.log.error('[CREATION] Unknown state: ' + objects[s]);
+                continue;
             }
-        });
-        subscribed = true;
-    }
-
-    if (obj.count) {
-        if (!typeObjects.count || typeObjects.count.indexOf(id) === -1) {
-            typeObjects.count = typeObjects.count || [];
-            typeObjects.count.push(id);
-        }
-        defineObject('count', id, logName); //type, id, name
-        tasks.push({
-            name: 'setObjectNotExists',
-            subscribe: !subscribed && id,
-            id: 'save.count',
-            obj: {
-                type: 'channel',
-                common: {
-                    name: 'Impulse counter, Counting of switching cycles',
-                    role: 'sensor'
-                },
-                native: {}
+            obj.native.addr = id;
+            if (unit && objects[s] !== 'dayCount') {
+                obj.common.unit = unit;
             }
-        });
-        subscribed = true;
-    }
-
-    // Conversion pulses into consumption is only useful if pulses exist
-    if (obj.sumCount && obj.count) {
-        if (!typeObjects.sumCount || typeObjects.sumCount.indexOf(id) === -1) {
-            typeObjects.sumCount = typeObjects.sumCount || [];
-            typeObjects.sumCount.push(id);
-        }
-        defineObject('sumCount', id, logName, obj.unit); //type, id, name, Unit
-        tasks.push({
-            name: 'setObjectNotExists',
-            subscribe: !subscribed && id,
-            id: 'save.sumCount',
-            obj: {
-                type: 'channel',
-                common: {
-                    name: 'Consumption from impulse counter',
-                    role: 'sensor'
-                },
-                native: {}
-            }
-        });
-    }
-
-    if (obj.sumDelta) {
-        if (!typeObjects.sumDelta || typeObjects.sumDelta.indexOf(id) === -1) {
-            typeObjects.sumDelta = typeObjects.sumDelta || [];
-            typeObjects.sumDelta.push(id);
-        }
-        defineObject('sumDelta', id, logName); //type, id, name
-        tasks.push({
-            name: 'setObjectNotExists',
-            subscribe: !subscribed && id,
-            id: 'save.sumDelta',
-            obj: {
-                type: 'channel',
-                common: {
-                    name: 'Consumption',
-                    role: 'sensor'
-                },
-                native: {}
-            }
-        });
-        subscribed = true;
-    }
-
-    // sumGroup only makes sense if there are also the delta values
-    if (obj.sumGroup && (obj.sumDelta || (obj.sumCount && obj.count))) {
-        // submit sumgroupname for object creation
-        if (groups[obj.sumGroup] && groups[obj.sumGroup].config) {
-            if (!typeObjects.sumGroup || typeObjects.sumGroup.indexOf(obj.sumGroup) === -1) {
-                typeObjects.sumGroup = typeObjects.sumGroup || [];
-                typeObjects.sumGroup.push(obj.sumGroup);
-            }
-            defineObject('sumGroup', obj.sumGroup, 'Sum for ' + obj.sumGroup); // type, id ist der gruppenname, name
-            tasks.push({
+            this.tasks.push({
                 name: 'setObjectNotExists',
-                id: 'save.sumGroup',
+                id: 'save.' + type + '.' + id + '.' + objects[s],
+                obj
+            });
+        }
+
+        // states for the temporary values
+        objects = nameObjectType.temp;
+        for (let s = 0; s < objects.length; s++) {
+            if (!stateObjects[objects[s]]) {
+                this.log.error('[CREATION] State ' + objects[s] + ' unknown');
+                continue;
+            }
+            const obj = JSON.parse(JSON.stringify(stateObjects[objects[s]]));
+            if (!obj) {
+                this.log.error('[CREATION] Unknown state: ' + objects[s]);
+                continue;
+            }
+            obj.native.addr = id;
+            // obj.common.expert = true;
+            if (unit && objects[s] !== 'dayCount') {
+                obj.common.unit = unit;
+            } else if (obj.common.unit !== undefined) {
+                delete obj.common.unit;
+            }
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                id: 'temp.' + type + '.' + id + '.' + objects[s],
+                obj
+            });
+        }
+        isStart && this.processTasks();
+        this.setInitial(type, id);
+    }
+
+    setupObjects(ids, callback, isStart, noSubscribe) {
+        if (!ids || !ids.length) {
+            isStart && this.processTasks();
+            return callback && callback();
+        }
+        if (isStart === undefined) {
+            isStart = !this.tasks.length;
+        }
+        const id = ids.shift();
+        const obj = this.statDP[id];
+        if (!obj) {
+            return setImmediate(this.setupObjects, ids, callback, isStart);
+        }
+        let subscribed = !!noSubscribe;
+        if (!obj.groupFactor && obj.groupFactor !== '0' && obj.groupFactor !== 0) {
+            obj.groupFactor = parseFloat(this.config.groupFactor) || 1;
+        } else {
+            obj.groupFactor = parseFloat(obj.groupFactor) || 1;
+        }
+        if (!obj.impUnitPerImpulse && obj.impUnitPerImpulse !== '0' && obj.impUnitPerImpulse !== 0) {
+            obj.impUnitPerImpulse = parseInt(this.config.impUnitPerImpulse, 10) || 1;
+        } else {
+            obj.impUnitPerImpulse = parseInt(obj.impUnitPerImpulse, 10) || 1;
+        }
+        // merge der Kosten in den Datensatz
+        if (obj.sumGroup && ((obj.count && obj.sumCount) || obj.sumDelta)) {
+            this.groups[obj.sumGroup] = this.groups[obj.sumGroup] || { config: this.config.groups.find(g => g.id === obj.sumGroup), items: [] };
+            if (this.groups[obj.sumGroup].items.indexOf(id) === -1) {
+                this.groups[obj.sumGroup].items.push(id);
+            }
+        }
+
+        // Function is called with the custom objects
+        this.log.debug('[CREATION] ============================== ' + id + ' =============================');
+        this.log.debug('[CREATION] setup of object ' + JSON.stringify(obj));
+        const logName = obj.logName;
+        if (obj.avg && !obj.sumDelta) {
+            if (!this.typeObjects.avg || this.typeObjects.avg.indexOf(id) === -1) {
+                this.typeObjects.avg = this.typeObjects.avg || [];
+                this.typeObjects.avg.push(id);
+            }
+            this.defineObject('avg', id, logName); //type, id, name
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                subscribe: !subscribed && id,
+                id: 'save.avg',
                 obj: {
                     type: 'channel',
                     common: {
-                        name: 'Total consumption',
+                        name: 'Average values',
                         role: 'sensor'
                     },
                     native: {}
                 }
             });
-        } else {
-            adapter.log.error('[CREATION] No group config found for ' + obj.sumGroup);
+            subscribed = true;
         }
-    }
-    setImmediate(setupObjects, ids, callback, isStart);
-}
-
-function processTasks() {
-    if (!tasks || !tasks.length) {
-        units = {};
-        return;
-    }
-    const task = tasks.shift();
-    if (task.name === 'setObjectNotExists') {
-        const attr = task.id.split('.').pop();
-        // detect unit
-        if (task.obj.native.addr &&
-            task.obj.type === 'state' &&
-            units[task.obj.native.addr] === undefined &&
-            nameObjects.timeCount.temp.indexOf(attr) === -1 &&
-            !task.id.match(/\.dayCount$/) &&       // !! Problem mit .?
-            !task.id.startsWith('save.sumGroup.') &&
-            !task.id.startsWith('temp.sumGroup.')) {
-            adapter.getForeignObject(task.obj.native.addr, (err, obj) => {
-                if (obj && obj.common.unit) {
-                    task.obj.common.unit = obj.common.unit;
-                    units[task.obj.native.addr] = obj.common.unit;
-                } else {
-                    units[task.obj.native.addr] = '';
+        //	minmax over time
+        if (obj.minmax) {
+            if (!this.typeObjects.minmax || this.typeObjects.minmax.indexOf(id) === -1) {
+                this.typeObjects.minmax = this.typeObjects.minmax || [];
+                this.typeObjects.minmax.push(id);
+            }
+            this.defineObject('minmax', id, logName); //type, id, name
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                subscribe: !subscribed && id,
+                id: 'save.minmax',
+                obj: {
+                    type: 'channel',
+                    common: {
+                        name: 'MinMax values',
+                        role: 'sensor'
+                    },
+                    native: {}
                 }
+            });
+            subscribed = true;
+        }
+        // 5minutes Values can only be determined when counting
+        this.log.debug('[CREATION] fiveMin = ' + obj.fiveMin + ',  count =  ' + obj.count);
 
-                adapter.setObjectNotExists(task.id, task.obj, (err, isCreated) => {
-                    if (isCreated) {
-                        adapter.log.debug('[CREATION] ' + task.id);
-                    }
-                    if (task.subscribe) {
-                        adapter.subscribeForeignStates(task.subscribe, () => {
-                            setImmediate(processTasks);
-                        });
-                    } else {
-                        setImmediate(processTasks);
+        if (obj.fiveMin && obj.count) {
+            if (!this.typeObjects.fiveMin || this.typeObjects.fiveMin.indexOf(id) === -1) {
+                this.typeObjects.fiveMin = this.typeObjects.fiveMin || [];
+                this.typeObjects.fiveMin.push(id);
+            }
+            this.defineObject('fiveMin', id, logName); //type, id, name
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                subscribe: !subscribed && id,
+                id: 'save.fiveMin',
+                obj: {
+                    type: 'channel',
+                    common: {
+                        name: '5min Consumption',
+                        role: 'sensor'
+                    },
+                    native: {}
+                }
+            });
+            subscribed = true;
+        }
+
+        if (obj.timeCount) {
+            if (!this.typeObjects.timeCount || this.typeObjects.timeCount.indexOf(id) === -1) {
+                this.typeObjects.timeCount = this.typeObjects.timeCount || [];
+                this.typeObjects.timeCount.push(id);
+            }
+            this.defineObject('timeCount', id, logName); //type, id, name
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                subscribe: !subscribed && id,
+                id: 'save.timeCount',
+                obj: {
+                    type: 'channel',
+                    common: {
+                        name: 'Operation time counter',
+                        role: 'sensor'
+                    },
+                    native: {}
+                }
+            });
+            subscribed = true;
+        }
+
+        if (obj.count) {
+            if (!this.typeObjects.count || this.typeObjects.count.indexOf(id) === -1) {
+                this.typeObjects.count = this.typeObjects.count || [];
+                this.typeObjects.count.push(id);
+            }
+            this.defineObject('count', id, logName); //type, id, name
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                subscribe: !subscribed && id,
+                id: 'save.count',
+                obj: {
+                    type: 'channel',
+                    common: {
+                        name: 'Impulse counter, Counting of switching cycles',
+                        role: 'sensor'
+                    },
+                    native: {}
+                }
+            });
+            subscribed = true;
+        }
+
+        // Conversion pulses into consumption is only useful if pulses exist
+        if (obj.sumCount && obj.count) {
+            if (!this.typeObjects.sumCount || this.typeObjects.sumCount.indexOf(id) === -1) {
+                this.typeObjects.sumCount = this.typeObjects.sumCount || [];
+                this.typeObjects.sumCount.push(id);
+            }
+            this.defineObject('sumCount', id, logName, obj.unit); //type, id, name, Unit
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                subscribe: !subscribed && id,
+                id: 'save.sumCount',
+                obj: {
+                    type: 'channel',
+                    common: {
+                        name: 'Consumption from impulse counter',
+                        role: 'sensor'
+                    },
+                    native: {}
+                }
+            });
+        }
+
+        if (obj.sumDelta) {
+            if (!this.typeObjects.sumDelta || this.typeObjects.sumDelta.indexOf(id) === -1) {
+                this.typeObjects.sumDelta = this.typeObjects.sumDelta || [];
+                this.typeObjects.sumDelta.push(id);
+            }
+            this.defineObject('sumDelta', id, logName); //type, id, name
+            this.tasks.push({
+                name: 'setObjectNotExists',
+                subscribe: !subscribed && id,
+                id: 'save.sumDelta',
+                obj: {
+                    type: 'channel',
+                    common: {
+                        name: 'Consumption',
+                        role: 'sensor'
+                    },
+                    native: {}
+                }
+            });
+            subscribed = true;
+        }
+
+        // sumGroup only makes sense if there are also the delta values
+        if (obj.sumGroup && (obj.sumDelta || (obj.sumCount && obj.count))) {
+            // submit sumgroupname for object creation
+            if (this.groups[obj.sumGroup] && this.groups[obj.sumGroup].config) {
+                if (!this.typeObjects.sumGroup || this.typeObjects.sumGroup.indexOf(obj.sumGroup) === -1) {
+                    this.typeObjects.sumGroup = this.typeObjects.sumGroup || [];
+                    this.typeObjects.sumGroup.push(obj.sumGroup);
+                }
+                this.defineObject('sumGroup', obj.sumGroup, 'Sum for ' + obj.sumGroup); // type, id ist der gruppenname, name
+                this.tasks.push({
+                    name: 'setObjectNotExists',
+                    id: 'save.sumGroup',
+                    obj: {
+                        type: 'channel',
+                        common: {
+                            name: 'Total consumption',
+                            role: 'sensor'
+                        },
+                        native: {}
                     }
                 });
-            });
-        } else {
-            if (task.obj.native.addr && !task.id.match(/\.dayCount$/)) { // !! Problem mit .?
-                if (units[task.obj.native.addr] !== undefined) {
-                    if (units[task.obj.native.addr]) {
-                        task.obj.common.unit = units[task.obj.native.addr];
+            } else {
+                this.log.error('[CREATION] No group config found for ' + obj.sumGroup);
+            }
+        }
+        setImmediate(this.setupObjects, ids, callback, isStart);
+    }
+
+    processTasks() {
+        if (!this.tasks || !this.tasks.length) {
+            this.units = {};
+            return;
+        }
+        const task = this.tasks.shift();
+        if (task.name === 'setObjectNotExists') {
+            const attr = task.id.split('.').pop();
+            // detect unit
+            if (task.obj.native.addr &&
+                task.obj.type === 'state' &&
+                this.units[task.obj.native.addr] === undefined &&
+                this.nameObjects.timeCount.temp.indexOf(attr) === -1 &&
+                !task.id.match(/\.dayCount$/) &&       // !! Problem mit .?
+                !task.id.startsWith('save.sumGroup.') &&
+                !task.id.startsWith('temp.sumGroup.')) {
+                this.getForeignObject(task.obj.native.addr, (err, obj) => {
+                    if (obj && obj.common.unit) {
+                        task.obj.common.unit = obj.common.unit;
+                        this.units[task.obj.native.addr] = obj.common.unit;
+                    } else {
+                        this.units[task.obj.native.addr] = '';
                     }
-                } else
+
+                    this.setObjectNotExists(task.id, task.obj, (err, isCreated) => {
+                        if (isCreated) {
+                            this.log.debug('[CREATION] ' + task.id);
+                        }
+                        if (task.subscribe) {
+                            this.subscribeForeignStates(task.subscribe, () => {
+                                setImmediate(this.processTasks);
+                            });
+                        } else {
+                            setImmediate(this.processTasks);
+                        }
+                    });
+                });
+            } else {
+                if (task.obj.native.addr && !task.id.match(/\.dayCount$/)) { // !! Problem mit .?
+                    if (this.units[task.obj.native.addr] !== undefined) {
+                        if (this.units[task.obj.native.addr]) {
+                            task.obj.common.unit = this.units[task.obj.native.addr];
+                        }
+                    } else
                     if (task.id.startsWith('save.sumGroup.') || task.id.startsWith('temp.sumGroup.')) {
-                        task.obj.common.unit = groups[task.obj.native.addr] && groups[task.obj.native.addr].config && groups[task.obj.native.addr].config.priceUnit ? groups[task.obj.native.addr].config.priceUnit.split('/')[0] : '€';
+                        task.obj.common.unit = this.groups[task.obj.native.addr] && this.groups[task.obj.native.addr].config && this.groups[task.obj.native.addr].config.priceUnit ? this.groups[task.obj.native.addr].config.priceUnit.split('/')[0] : '€';
                     }
-            }
+                }
 
-            adapter.setObjectNotExists(task.id, task.obj, (err, isCreated) => {
-                if (isCreated) {
-                    adapter.log.debug('[CREATION] ' + task.id);
-                }
-                if (task.subscribe) {
-                    adapter.subscribeForeignStates(task.subscribe, () => setImmediate(processTasks));
-                } else {
-                    setImmediate(processTasks);
-                }
-            });
+                this.setObjectNotExists(task.id, task.obj, (err, isCreated) => {
+                    if (isCreated) {
+                        this.log.debug('[CREATION] ' + task.id);
+                    }
+                    if (task.subscribe) {
+                        this.subscribeForeignStates(task.subscribe, () => setImmediate(this.processTasks));
+                    } else {
+                        setImmediate(this.processTasks);
+                    }
+                });
+            }
+        } else if (task.name === 'async') {
+            if (typeof task.callback === 'function') {
+                task.callback(task.args, () => setImmediate(this.processTasks));
+            } else {
+                this.log.error('error');
+            }
         }
-    } else if (task.name === 'async') {
-        if (typeof task.callback === 'function') {
-            task.callback(task.args, () => setImmediate(processTasks));
+    }
+
+    padding(text, num) {
+        if (text.length > num) {
+            return text;
         } else {
-            adapter.log.error('error');
+            return text + new Array(num - text.length).join(' ');
         }
     }
-}
-function padding(text, num) {
-    if (text.length > num) {
-        return text;
-    } else {
-        return text + new Array(num - text.length).join(' ');
-    }
-}
-function getCronStat() {
-    for (const type in crons) {
-        if (crons.hasOwnProperty(type) && crons[type]) {
-            adapter.log.debug('[INFO] ' + padding(type, 15) + '      status = ' + crons[type].running + ' next event: ' + timeConverter(crons[type].nextDates()));
-        }
-    }
-}
 
-function main() {
-    // typeObjects is rebuilt after starting the adapter
-    // deleting data points during runtime must be cleaned up in both arrays
-    // reading the setting (here come with other setting!)
-    adapter.getObjectView('custom', 'state', {}, (err, doc) => {
-        let objCount = 0;
-        if (doc && doc.rows) {
-            for (let i = 0, l = doc.rows.length; i < l; i++) {
-                if (doc.rows[i].value) {
-                    const id = doc.rows[i].id;
-                    const custom = doc.rows[i].value;
-                    if (!custom || !custom[adapter.namespace] || !custom[adapter.namespace].enabled) continue;
-                    statDP[id] = custom[adapter.namespace]; // all-inclusive assumption of all answers
-                    objCount++;
-                    adapter.log.info('[CREATION] enabled statistics for ' + id);
-                }
+    getCronStat() {
+        for (const type in this.crons) {
+            if (this.crons.hasOwnProperty(type) && this.crons[type]) {
+                this.log.debug('[INFO] ' + this.padding(type, 15) + '      status = ' + this.crons[type].running + ' next event: ' + this.timeConverter(this.crons[type].nextDates()));
             }
-            const keys = Object.keys(statDP);
-            setupObjects(keys, () => {
-                adapter.log.info('[INFO] statistics observes ' + objCount + ' values after startup');
-                for (const type in typeObjects) {
-                    if (typeObjects.hasOwnProperty(type)) {
-                        for (let i = 0; i < typeObjects[type].length; i++) {
-                            adapter.log.info('[INFO] monitor "' + typeObjects[type][i] + '" as ' + type);
+        }
+    }
+
+    async onReady() {
+        // typeObjects is rebuilt after starting the adapter
+        // deleting data points during runtime must be cleaned up in both arrays
+        // reading the setting (here come with other setting!)
+        this.getObjectView('custom', 'state', {}, (err, doc) => {
+            let objCount = 0;
+            if (doc && doc.rows) {
+                for (let i = 0, l = doc.rows.length; i < l; i++) {
+                    if (doc.rows[i].value) {
+                        const id = doc.rows[i].id;
+                        const custom = doc.rows[i].value;
+                        if (!custom || !custom[this.namespace] || !custom[this.namespace].enabled) continue;
+                        this.statDP[id] = custom[this.namespace]; // all-inclusive assumption of all answers
+                        objCount++;
+                        this.log.info('[CREATION] enabled statistics for ' + id);
+                    }
+                }
+                const keys = Object.keys(this.statDP);
+                this.setupObjects(keys, () => {
+                    this.log.info('[INFO] statistics observes ' + objCount + ' values after startup');
+                    for (const type in this.typeObjects) {
+                        if (this.typeObjects.hasOwnProperty(type)) {
+                            for (let i = 0; i < this.typeObjects[type].length; i++) {
+                                this.log.info('[INFO] monitor "' + this.typeObjects[type][i] + '" as ' + type);
+                            }
                         }
                     }
-                }
-                getCronStat();
-            });
+                    this.getCronStat();
+                });
+            }
+        });
+
+        // create cron-jobs
+        const timezone = this.config.timezone || 'Europe/Berlin';
+
+        // every 5min
+        try {
+            this.crons.avg5min = new CronJob('*/5 * * * *',
+                () => this.fiveMin(),
+                () => this.log.debug('stopped 5min'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
         }
-    });
 
-    // create cron-jobs
-    const timezone = adapter.config.timezone || 'Europe/Berlin';
+        // Every 15 minutes
+        try {
+            this.crons.fifteenMinSave = new CronJob('0,15,30,45 * * * *',
+                () => this.saveValues('15Min'),
+                () => this.log.debug('stopped daySave'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
 
-    // every 5min
-    try {
-        crons.avg5min = new CronJob('*/5 * * * *',
-            () => fiveMin(),
-            () => adapter.log.debug('stopped 5min'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
+        // Hourly at 00 min
+        try {
+            this.crons.hourSave = new CronJob('0 * * * *',
+                () => this.saveValues('hour'),
+                () => this.log.debug('stopped daySave'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
+
+        // daily um 23:59:58
+        try {
+            this.crons.dayTriggerTimeCount = new CronJob('58 59 23 * * *',
+                () => this.setTimeCountMidnight(),
+                () => this.log.debug('stopped timecount midnight trigger'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
+
+        // daily um 00:00
+        try {
+            this.crons.daySave = new CronJob('0 0 * * *',
+                () => this.saveValues('day'),
+                () => this.log.debug('stopped daySave'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
+
+        // Monday 00:00
+        try {
+            this.crons.weekSave = new CronJob('0 0 * * 1',
+                () => this.saveValues('week'),
+                () => this.log.debug('stopped week'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
+
+        // Monthly at 1 of every month at 00:00
+        try {
+            this.crons.monthSave = new CronJob('0 0 1 * *',
+                () => this.saveValues('month'),
+                () => this.log.debug('stopped month'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
+
+        // Quarter
+        try {
+            this.crons.quarterSave = new CronJob('0 0 1 0,3,6,9 *',
+                () => this.saveValues('quarter'),
+                () => this.log.debug('stopped quarter'), // This function is executed when the job stops
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
+
+        // New year
+        try {
+            this.crons.yearSave = new CronJob('0 0 1 0 *',
+                () => this.saveValues('year'), // Months is value range 0-11
+                () => this.log.debug('stopped yearSave'),
+                true,
+                timezone
+            );
+        } catch (e) {
+    			this.log.error('creating cron errored with :' + e);
+        }
+
+        // subscribe to objects, so the settings in the object are arriving to the adapter
+        this.subscribeForeignObjects('*');
     }
 
-    // Every 15 minutes
-    try {
-        crons.fifteenMinSave = new CronJob('0,15,30,45 * * * *',
-            () => saveValues('15Min'),
-            () => adapter.log.debug('stopped daySave'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
+    onUnload(callback) {
+        try {
+            this.stopCrons();
+            callback();
+        } catch (e) {
+            callback();
+        }
     }
-
-    // Hourly at 00 min
-    try {
-        crons.hourSave = new CronJob('0 * * * *',
-            () => saveValues('hour'),
-            () => adapter.log.debug('stopped daySave'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
-    }
-
-    // daily um 23:59:58
-    try {
-        crons.dayTriggerTimeCount = new CronJob('58 59 23 * * *',
-            () => setTimeCountMidnight(),
-            () => adapter.log.debug('stopped timecount midnight trigger'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
-    }
-
-    // daily um 00:00
-    try {
-        crons.daySave = new CronJob('0 0 * * *',
-            () => saveValues('day'),
-            () => adapter.log.debug('stopped daySave'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
-    }
-
-    // Monday 00:00
-    try {
-        crons.weekSave = new CronJob('0 0 * * 1',
-            () => saveValues('week'),
-            () => adapter.log.debug('stopped week'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
-    }
-
-    // Monthly at 1 of every month at 00:00
-    try {
-        crons.monthSave = new CronJob('0 0 1 * *',
-            () => saveValues('month'),
-            () => adapter.log.debug('stopped month'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
-    }
-
-    // Quarter
-    try {
-        crons.quarterSave = new CronJob('0 0 1 0,3,6,9 *',
-            () => saveValues('quarter'),
-            () => adapter.log.debug('stopped quarter'), // This function is executed when the job stops
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
-    }
-
-    // New year
-    try {
-        crons.yearSave = new CronJob('0 0 1 0 *',
-            () => saveValues('year'), // Months is value range 0-11
-            () => adapter.log.debug('stopped yearSave'),
-            true,
-            timezone
-        );
-    } catch (e) {
-			adapter.log.error('creating cron errored with :' + e);
-    }
-
-    // subscribe to objects, so the settings in the object are arriving to the adapter
-    adapter.subscribeForeignObjects('*');
 }
 
-// If started as allInOne/compact mode => return function to create instance
-if (module && module.parent) {
-    module.exports = startAdapter;
+// @ts-ignore parent is a valid property on module
+if (module.parent) {
+    // Export the constructor in compact mode
+    /**
+     * @param {Partial<utils.AdapterOptions>} [options={}]
+     */
+    module.exports = (options) => new Statistics(options);
 } else {
-    // or start the instance directly
-    startAdapter();
+    // otherwise start the instance directly
+    new Statistics();
 }
